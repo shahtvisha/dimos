@@ -109,22 +109,27 @@ class RealSenseMapModule(Module):
                 PointCloud2.from_numpy(xyz_vox, frame_id=self.config.frame_id, timestamp=ts)
             )
 
-            # Accumulated global map — rotation-only frame, ghost clearing
+            # Accumulated global map — world frame for CostMapper compatibility.
+            # XY positions must be world-stable so the occupancy grid is coherent.
+            # Voxel size is 4 cm (2× per-frame) to absorb ±2 cm ICP translation
+            # noise — keeps the same surface in the same grid cell across frames.
+            # Ghost clearing still runs in camera-relative space for ray-cast math.
+            _GVOX = _VOX_SIZE * 2   # 4 cm accumulation voxel
             if self._floor.ready and self._src.pose_locked:
                 if not self._map_ready:
                     self._floor_z   = cam_z + self._floor.floor_z
                     self._map_ready = True
 
-                xyz_r   = xyz_vox - pkt.pose_t                          # rotation-only
-                vk_r    = np.floor(xyz_r / _VOX_SIZE).astype(np.int32)
-                _, ui_r = np.unique(_pack(vk_r), return_index=True)
-                xyz_map = xyz_r[ui_r]
-                xyz_map = xyz_map[xyz_map[:, 2] > self._floor_z + 0.04]
+                # Floor filter in world frame; xyz_vox already world-frame
+                xyz_map = xyz_vox[xyz_vox[:, 2] > self._floor_z + 0.04]
 
                 if len(self._acc_pts) and len(xyz_map):
-                    free = _raycast_free_keys(xyz_map, _VOX_SIZE)
+                    # Ray-cast in camera-relative space
+                    xyz_map_rel = xyz_map - pkt.pose_t
+                    free = _raycast_free_keys(xyz_map_rel, _GVOX)
                     if len(free):
-                        keys          = _pack(np.floor(self._acc_pts / _VOX_SIZE).astype(np.int32))
+                        acc_rel = self._acc_pts - pkt.pose_t
+                        keys    = _pack(np.floor(acc_rel / _GVOX).astype(np.int32))
                         self._acc_pts = self._acc_pts[~np.isin(keys, free)]
 
                 if len(xyz_map):
@@ -133,7 +138,7 @@ class RealSenseMapModule(Module):
                         if len(self._acc_pts) else xyz_map.copy()
                     )
                     _, ui         = np.unique(
-                        _pack(np.floor(self._acc_pts / _VOX_SIZE).astype(np.int32)),
+                        _pack(np.floor(self._acc_pts / _GVOX).astype(np.int32)),
                         return_index=True,
                     )
                     self._acc_pts = self._acc_pts[ui]
