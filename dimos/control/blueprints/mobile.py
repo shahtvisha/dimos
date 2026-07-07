@@ -40,7 +40,6 @@ from dimos.hardware.sensors.lidar.fastlio2.module import FastLio2
 from dimos.mapping.costmapper import CostMapper
 from dimos.navigation.cmu_nav.main import cmu_nav_rerun_config, create_cmu_nav
 from dimos.navigation.movement_manager.movement_manager import MovementManager
-from dimos.navigation.replanning_a_star.module import ReplanningAStarPlanner
 from dimos.perception.stereo_point_cloud import StereoPointCloud
 from dimos.robot.unitree.g1.config import G1_LOCAL_PLANNER_PRECOMPUTED_PATHS
 from dimos.robot.unitree.keyboard_teleop import KeyboardTeleop
@@ -223,7 +222,6 @@ coordinator_flowbase_stereo_nav = (
         RealSenseCamera.blueprint(enable_depth=True, enable_pointcloud=False),
         StereoPointCloud.blueprint(),
         CostMapper.blueprint(),
-        ReplanningAStarPlanner.blueprint(),
         MovementManager.blueprint(),
         ControlCoordinator.blueprint(
             hardware=[_flowbase_twist_base()],
