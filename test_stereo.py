@@ -5,7 +5,7 @@ from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.coordination.module_coordinator import ModuleCoordinator
 
 if __name__ == '__main__':
-    import signal
+    import time
     pipeline = (
         autoconnect(
             RealSenseCamera.blueprint(enable_depth=True, enable_pointcloud=False),
@@ -15,4 +15,8 @@ if __name__ == '__main__':
         .global_config(n_workers=4)
     )
     ModuleCoordinator.build(pipeline, {}).start()
-    signal.pause()
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
