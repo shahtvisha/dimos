@@ -14,7 +14,8 @@ if __name__ == '__main__':
         )
         .global_config(n_workers=4)
     )
-    ModuleCoordinator.build(pipeline, {}).start()
+    coordinator = ModuleCoordinator.build(pipeline, {})
+    coordinator.start()
     try:
         while True:
             time.sleep(1)
