@@ -12,18 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Stereo depth → per-frame cloud + persistent global map.
-
-Takes depth_image + depth_camera_info from RealSenseCamera, applies the same
-gradient-stability filter and pinhole backprojection used in our standalone
-realsense_stereo_nav pipeline, then accumulates a world-frame global map with
-ray-cast ghost clearing suitable for CostMapper.
-
-  depth_image        (In)  — raw depth frames from RealSenseCamera
-  depth_camera_info  (In)  — intrinsics from RealSenseCamera
-  frame_cloud        (Out) — per-frame gradient-filtered world-frame cloud
-  global_map         (Out) — accumulated ghost-cleared map → CostMapper
-"""
+"""Stereo depth → per-frame cloud + persistent global map for CostMapper."""
 
 from __future__ import annotations
 
@@ -74,11 +63,7 @@ def _raycast_free_keys(
     n_rays: int = 200,
     max_steps: int = 40,
 ) -> np.ndarray:
-    """Sorted int64 keys of voxels on rays from camera origin to observed surfaces.
-
-    xyz_rel must be camera-relative (camera at origin). Returns keys of cells
-    the camera can see through — accumulated points there are ghosts.
-    """
+    """Keys of free-space voxels on rays from camera origin to observed surfaces (xyz_rel is camera-relative)."""
     if len(xyz_rel) == 0:
         return np.array([], dtype=np.int64)
 
@@ -106,21 +91,13 @@ class Config(ModuleConfig):
     max_global_pts: int       = 200_000
     publish_every: int        = 3       # emit global_map every N frames
     world_frame: str          = "world"
-    camera_frame: str         = "camera_optical"
+    camera_frame: str         = "camera_depth_optical_frame"
     base_frame: str           = "base_link"
     tf_timeout: float         = 0.2
 
 
 class StereoPointCloud(Module):
-    """Gradient-filtered stereo depth → ghost-cleared world-frame global map.
-
-    Replicates the realsense_stereo_nav standalone pipeline as a dimos Module:
-    gradient filter on raw depth → pinhole backproject → floor removal →
-    voxel dedup → ray-cast ghost clearing → accumulated global_map.
-
-    Wire depth_image and depth_camera_info from RealSenseCamera.
-    Wire global_map to CostMapper.global_map.
-    """
+    """Gradient filter → backproject → floor removal → voxel dedup → ray-cast ghost clearing → global_map."""
 
     config: Config
 
@@ -157,7 +134,6 @@ class StereoPointCloud(Module):
         with self._lock:
             info = self._latest_info
 
-        # --- Depth to float32 metres ---
         depth = img.data
         if hasattr(depth, "get"):
             depth = depth.get()
@@ -169,7 +145,6 @@ class StereoPointCloud(Module):
 
         H, W = depth.shape
 
-        # --- Intrinsics ---
         if info is not None:
             K = info.get_K_matrix()
             fx, fy, cx, cy = float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2])
@@ -177,7 +152,6 @@ class StereoPointCloud(Module):
             fx = fy = float(max(H, W)) / 2.0
             cx, cy  = W / 2.0, H / 2.0
 
-        # --- Gradient stability filter (same as realsense_stereo_nav) ---
         mask = (
             _gradient_mask(depth, self.config.gradient_threshold)
             & (depth > self.config.min_depth)
@@ -186,7 +160,6 @@ class StereoPointCloud(Module):
         if not mask.any():
             return
 
-        # --- Pinhole backproject: optical frame → camera_link frame ---
         uu, vv  = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32))
         dd      = depth[mask]
         xyz_opt = np.column_stack([
@@ -196,7 +169,6 @@ class StereoPointCloud(Module):
         ]).astype(np.float32)
         xyz_cam = xyz_opt @ _R_OPT_TO_LINK.T
 
-        # --- World frame via TF (falls back to identity if no TF yet) ---
         tf = self.tf.get(
             self.config.world_frame, self.config.camera_frame, img.ts, self.config.tf_timeout
         )
@@ -215,11 +187,7 @@ class StereoPointCloud(Module):
 
         xyz_world = (xyz_cam @ R.T + t).astype(np.float32)
 
-        # --- Floor detection: TF-primary, rolling percentile fallback ---
-        # base_link is by convention on the floor, so world→base_link.translation.z
-        # gives us the floor height immediately without any warm-up period.
-        # Falls back to a rolling low-Z percentile when TF is unavailable or
-        # base_transform hasn't been configured (e.g. identity mounting).
+        # TF-primary floor detection; falls back to rolling low-Z percentile
         base_tf = self.tf.get(
             self.config.world_frame, self.config.base_frame, img.ts, self.config.tf_timeout
         )
@@ -233,7 +201,6 @@ class StereoPointCloud(Module):
                     self._floor_buf.pop(0)
             floor_z = float(np.percentile(self._floor_buf, 20)) if len(self._floor_buf) >= 5 else None
 
-        # --- Per-frame voxel dedup + floor filter ---
         vk      = np.floor(xyz_world / self.config.vox_size).astype(np.int32)
         _, ui   = np.unique(_pack(vk), return_index=True)
         xyz_vox = xyz_world[ui]
@@ -246,7 +213,6 @@ class StereoPointCloud(Module):
             PointCloud2.from_numpy(xyz_vox, frame_id=self.config.world_frame, timestamp=img.ts)
         )
 
-        # --- Accumulated global map with ray-cast ghost clearing ---
         xyz_rel  = xyz_vox - t
         pts_snap = None
 
