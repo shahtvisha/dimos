@@ -131,6 +131,13 @@ class StereoPointCloud(Module):
             self._latest_info = info
 
     def _on_depth(self, img: Image) -> None:
+        try:
+            self._process_depth(img)
+        except Exception as e:
+            import traceback
+            print(f"[StereoPointCloud] _on_depth error: {e}\n{traceback.format_exc()}", flush=True)
+
+    def _process_depth(self, img: Image) -> None:
         with self._lock:
             info = self._latest_info
 
