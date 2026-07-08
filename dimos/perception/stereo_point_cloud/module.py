@@ -55,7 +55,6 @@ from dimos.perception.stereo_point_cloud.utils import (
     _projective_miss_keys,
     _unpack_centers,
 )
-from dimos.perception.stereo_point_cloud.vio import MadgwickFilter
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -77,7 +76,6 @@ class Config(ModuleConfig):
     global_vox_size: float    = 0.020
     publish_every: int        = 2
     world_frame: str          = "world"
-    madgwick_beta: float      = 0.033
     cam_height_prior: float   = 1.0
     # projective clearing: a stored voxel is a 'miss' when the measured depth
     # at its pixel is behind it by max(clear_min_margin, 3 * sigma_z(range))
@@ -104,12 +102,6 @@ class StereoPointCloud(Module):
         super().__init__(**kwargs)
         self._lock                       = threading.Lock()
         self._latest_info: CameraInfo | None = None
-        self._madgwick: MadgwickFilter | None = None
-        self._imu_lock                   = threading.Lock()
-        self._last_accel                 = np.array([0.0, 0.0, -9.81], dtype=np.float32)
-        self._R_imu_to_link: np.ndarray  = np.eye(3, dtype=np.float32)
-        self._motion_sensor              = None
-        self._madgwick_seeded            = False
         self._voxmap                     = LogOddsVoxelMap()
         self._map_lock                   = threading.Lock()
         self._uv_cache: dict[tuple[int, int, int], tuple[np.ndarray, np.ndarray]] = {}
@@ -121,93 +113,10 @@ class StereoPointCloud(Module):
     @rpc
     def start(self) -> None:
         super().start()
-        self._madgwick = MadgwickFilter(beta=self.config.madgwick_beta)
-        if not self._init_imu():
-            logger.warning(
-                "StereoPointCloud: no IMU — roll/pitch assumed level (fine for a level mount)"
-            )
         self.register_disposable(Disposable(self.depth_camera_info.subscribe(self._on_info)))
         self.register_disposable(Disposable(self.depth_image.subscribe(self._on_depth)))
 
-    @rpc
-    def stop(self) -> None:
-        if self._motion_sensor is not None:
-            try:
-                self._motion_sensor.stop()
-                self._motion_sensor.close()
-            except Exception:
-                pass
-            self._motion_sensor = None
-        super().stop()
-
-    def _init_imu(self) -> bool:
-        try:
-            import pyrealsense2 as rs
-        except ImportError:
-            return False
-        ctx     = rs.context()
-        devices = ctx.query_devices()
-        if not devices:
-            return False
-        device = devices[0]
-        depth_profile = None
-        for sensor in device.query_sensors():
-            if sensor.is_motion_sensor():
-                continue
-            for p in sensor.get_stream_profiles():
-                if p.stream_type() == rs.stream.depth:
-                    depth_profile = p
-                    break
-            if depth_profile is not None:
-                break
-        for sensor in device.query_sensors():
-            if not sensor.is_motion_sensor():
-                continue
-            all_profiles   = sensor.get_stream_profiles()
-            gyro_profiles  = [p for p in all_profiles if p.stream_type() == rs.stream.gyro]
-            accel_profiles = [p for p in all_profiles if p.stream_type() == rs.stream.accel]
-            if not gyro_profiles or not accel_profiles:
-                break
-            gyro_p  = max(gyro_profiles,  key=lambda p: p.fps())
-            accel_p = max(accel_profiles, key=lambda p: p.fps())
-            if depth_profile is not None:
-                ext                 = accel_p.get_extrinsics_to(depth_profile)
-                R_imu_to_depth      = np.array(ext.rotation, dtype=np.float32).reshape(3, 3)
-                self._R_imu_to_link = _R_OPT_TO_LINK @ R_imu_to_depth
-            sensor.open([gyro_p, accel_p])
-            sensor.start(self._on_motion)
-            self._motion_sensor = sensor
-            logger.info(f"StereoPointCloud: IMU — gyro@{gyro_p.fps()}Hz accel@{accel_p.fps()}Hz")
-            return True
-        return False
-
     # -------------------------------------------------------------- callbacks
-
-    def _on_motion(self, frame: Any) -> None:
-        try:
-            import pyrealsense2 as rs
-            st = frame.get_profile().stream_type()
-            if st == rs.stream.gyro:
-                g        = frame.as_motion_frame().get_motion_data()
-                gyro_lnk = self._R_imu_to_link @ np.array([g.x, g.y, g.z], dtype=np.float32)
-                ts_s     = frame.get_timestamp() / 1000.0
-                with self._imu_lock:
-                    if self._madgwick is not None and self._madgwick_seeded:
-                        self._madgwick.update(gyro_lnk, self._last_accel, ts_s)
-            elif st == rs.stream.accel:
-                a = frame.as_motion_frame().get_motion_data()
-                with self._imu_lock:
-                    self._last_accel = self._R_imu_to_link @ np.array(
-                        [a.x, a.y, a.z], dtype=np.float32
-                    )
-                    if not self._madgwick_seeded and self._madgwick is not None:
-                        # seed roll/pitch from gravity so the filter is correct
-                        # immediately — beta=0.033 converges too slowly from
-                        # identity for floor calibration at frames 30-60
-                        self._madgwick.init_from_accel(self._last_accel)
-                        self._madgwick_seeded = True
-        except Exception:
-            pass
 
     def _on_info(self, info: CameraInfo) -> None:
         with self._lock:
@@ -290,23 +199,15 @@ class StereoPointCloud(Module):
             dd,
         ]).astype(np.float32)
 
-        # Orientation: roll/pitch from Madgwick (gravity); yaw fixed at 0.
-        with self._imu_lock:
-            R_tilt = (
-                self._madgwick.R_rollpitch_only()
-                if (self._madgwick is not None and self._madgwick_seeded)
-                else np.eye(3, dtype=np.float32)
-            )
-
-        xyz_cam  = xyz_opt @ _R_OPT_TO_LINK.T
-        xyz_grav = (xyz_cam @ R_tilt.T).astype(np.float32)  # gravity-aligned, camera-centered
+        # Level mount assumed — no tilt correction.
+        xyz_cam = (xyz_opt @ _R_OPT_TO_LINK.T).astype(np.float32)
 
         h = float(self.config.cam_height_prior)
 
         cam_pos = np.array([0.0, 0.0, h + 1.0], dtype=np.float32)
 
         # World frame: z = 0 at the floor (dimos-wide convention).
-        xyz_world = (xyz_grav + cam_pos).astype(np.float32)
+        xyz_world = (xyz_cam + cam_pos).astype(np.float32)
 
         # ---- per-frame voxel cloud (floor KEPT — height_cost needs it) ----
         vk       = np.floor(xyz_world / self.config.vox_size).astype(np.int32)
@@ -342,7 +243,7 @@ class StereoPointCloud(Module):
                 cx,
                 cy,
                 stride,
-                R_tilt.astype(np.float32),
+                np.eye(3, dtype=np.float32),
                 cam_pos,
                 self.config.mapping_range,
                 min_margin=self.config.clear_min_margin,
