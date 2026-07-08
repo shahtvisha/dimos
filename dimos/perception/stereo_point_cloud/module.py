@@ -12,7 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""D435i depth → per-frame voxel cloud + persistent global map (Madgwick + ICP VIO)."""
+"""D435i depth → per-frame voxel cloud + persistent log-odds global map.
+
+Frames & conventions (matches the rest of dimos — rerun grid/floor, occupancy
+algos, cmu_nav all assume this):
+
+- ``world_frame``: gravity-aligned, **z = 0 at the floor**. The camera starts
+  at (0, 0, cam_height).
+- Pose: roll/pitch from the D435i IMU via Madgwick (yaw-stripped — gyro yaw
+  drifts); translation and yaw are fixed at zero for this initial test pass
+  (stationary camera assumption). Add wheel odometry input later.
+- Floor points are KEPT in ``global_map``: CostMapper's ``height_cost`` needs
+  ground returns to mark free/traversable space (deleted floor = unknown
+  cells, not free cells).
+- Occupancy is a log-odds voxel map with PROJECTIVE clearing: every stored
+  voxel in the camera frustum is tested against the measured depth at its
+  pixel every frame. 2 hits to appear (~130 ms at 15 fps), 3 misses to clear
+  (~200 ms) — moved objects free their space almost immediately, single noisy
+  frames cannot erase real obstacles (e.g. a thin floor mat), occlusion is
+  handled correctly, and pixels with no depth return contribute no evidence.
+"""
 
 from __future__ import annotations
 
@@ -29,13 +48,15 @@ from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.perception.stereo_point_cloud.utils import (
-    _FloorCalibrator,
     _R_OPT_TO_LINK,
+    LogOddsVoxelMap,
+    _FloorCalibrator,
     _gradient_mask,
     _pack,
-    _raycast_free_keys,
+    _projective_miss_keys,
+    _unpack_centers,
 )
-from dimos.perception.stereo_point_cloud.vio import MadgwickFilter, PointCloudOdometry
+from dimos.perception.stereo_point_cloud.vio import MadgwickFilter
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -46,19 +67,34 @@ _DEPTH_MM_THRESHOLD = 100
 class Config(ModuleConfig):
     min_depth: float          = 0.1
     max_depth: float          = 8.0
+    # points beyond this range are visualized (frame_cloud) but NOT written to
+    # the global map — D435i depth sigma at 5 m is ~9 cm, useless at 2 cm voxels
+    mapping_range: float      = 5.0
     gradient_threshold: float = 0.30
+    # subsample depth image by this pixel stride before backprojection
+    # (2 → 4x less compute; at 2 cm voxels nothing is lost)
+    pixel_stride: int         = 2
     vox_size: float           = 0.020
     global_vox_size: float    = 0.020
-    floor_margin: float       = 0.005
-    global_floor_margin: float = 0.005
-    max_global_pts: int       = 500_000
-    publish_every: int        = 1
+    publish_every: int        = 2
     world_frame: str          = "world"
     madgwick_beta: float      = 0.033
+    # camera mount height prior (m). Used until floor calibration converges,
+    # and as a sanity check afterwards. Set to the actual mount height.
+    cam_height_prior: float   = 1.0
+    floor_sanity_diff: float  = 0.15
+    # projective clearing: a stored voxel is a 'miss' when the measured depth
+    # at its pixel is behind it by max(clear_min_margin, 3 * sigma_z(range))
+    clear_min_margin: float   = 0.06
+    # rolling local map: voxels farther than this (xy) from the robot are
+    # dropped — bounds memory AND odometry-drift error
+    map_radius: float         = 12.0
+    prune_every: int          = 150
+    max_global_pts: int       = 800_000
 
 
 class StereoPointCloud(Module):
-    """D435i depth → frame_cloud + global_map. Pose from Madgwick IMU + ICP odometry."""
+    """D435i depth → frame_cloud + global_map (log-odds, floor at z = 0)."""
 
     config: Config
 
@@ -74,24 +110,29 @@ class StereoPointCloud(Module):
         self._latest_info: CameraInfo | None = None
         self._floor_calib                = _FloorCalibrator()
         self._madgwick: MadgwickFilter | None = None
-        self._odom                       = PointCloudOdometry()
         self._imu_lock                   = threading.Lock()
         self._last_accel                 = np.array([0.0, 0.0, -9.81], dtype=np.float32)
         self._R_imu_to_link: np.ndarray  = np.eye(3, dtype=np.float32)
         self._motion_sensor              = None
-        self._acc_pts: np.ndarray        = np.empty((0, 3), dtype=np.float32)
-        self._map_ready                  = False
-        self._world_floor_z: float       = 0.0
-        self._last_t: np.ndarray         = np.zeros(3, dtype=np.float32)
+        self._madgwick_seeded            = False
+        self._voxmap                     = LogOddsVoxelMap()
+        self._map_lock                   = threading.Lock()
+        self._uv_cache: dict[tuple[int, int, int], tuple[np.ndarray, np.ndarray]] = {}
         self._frame                      = 0
         self._warned_no_intrinsics       = False
+        self._warned_floor_sanity        = False
+        self._logged_calibrated          = False
+
+    # ------------------------------------------------------------------ setup
 
     @rpc
     def start(self) -> None:
         super().start()
         self._madgwick = MadgwickFilter(beta=self.config.madgwick_beta)
         if not self._init_imu():
-            logger.warning("StereoPointCloud: no IMU — R=identity, translation from ICP only")
+            logger.warning(
+                "StereoPointCloud: no IMU — roll/pitch assumed level (fine for a level mount)"
+            )
         self.register_disposable(Disposable(self.depth_camera_info.subscribe(self._on_info)))
         self.register_disposable(Disposable(self.depth_image.subscribe(self._on_depth)))
 
@@ -147,6 +188,8 @@ class StereoPointCloud(Module):
             return True
         return False
 
+    # -------------------------------------------------------------- callbacks
+
     def _on_motion(self, frame: Any) -> None:
         try:
             import pyrealsense2 as rs
@@ -156,18 +199,62 @@ class StereoPointCloud(Module):
                 gyro_lnk = self._R_imu_to_link @ np.array([g.x, g.y, g.z], dtype=np.float32)
                 ts_s     = frame.get_timestamp() / 1000.0
                 with self._imu_lock:
-                    if self._madgwick is not None:
+                    if self._madgwick is not None and self._madgwick_seeded:
                         self._madgwick.update(gyro_lnk, self._last_accel, ts_s)
             elif st == rs.stream.accel:
                 a = frame.as_motion_frame().get_motion_data()
                 with self._imu_lock:
-                    self._last_accel = self._R_imu_to_link @ np.array([a.x, a.y, a.z], dtype=np.float32)
+                    self._last_accel = self._R_imu_to_link @ np.array(
+                        [a.x, a.y, a.z], dtype=np.float32
+                    )
+                    if not self._madgwick_seeded and self._madgwick is not None:
+                        # seed roll/pitch from gravity so the filter is correct
+                        # immediately — beta=0.033 converges too slowly from
+                        # identity for floor calibration at frames 30-60
+                        self._madgwick.init_from_accel(self._last_accel)
+                        self._madgwick_seeded = True
         except Exception:
             pass
 
     def _on_info(self, info: CameraInfo) -> None:
         with self._lock:
             self._latest_info = info
+
+    def _uv_grid(self, H: int, W: int, stride: int) -> tuple[np.ndarray, np.ndarray]:
+        """Cached full-resolution pixel coordinate grids sampled with stride."""
+        key = (H, W, stride)
+        grids = self._uv_cache.get(key)
+        if grids is None:
+            uu, vv = np.meshgrid(
+                np.arange(0, W, stride, dtype=np.float32),
+                np.arange(0, H, stride, dtype=np.float32),
+            )
+            grids = (uu, vv)
+            self._uv_cache[key] = grids
+        return grids
+
+    def _cam_height(self) -> float:
+        """Calibrated camera height above floor, falling back to the prior."""
+        if self._floor_calib.ready:
+            h = float(self._floor_calib.cam_height)  # type: ignore[arg-type]
+            if not self._logged_calibrated:
+                self._logged_calibrated = True
+                logger.info(f"StereoPointCloud: using calibrated camera height {h:.3f} m")
+            if (
+                abs(h - self.config.cam_height_prior) > self.config.floor_sanity_diff
+                and not self._warned_floor_sanity
+            ):
+                self._warned_floor_sanity = True
+                logger.warning(
+                    f"StereoPointCloud: calibrated height {h:.3f} m differs from "
+                    f"prior {self.config.cam_height_prior:.3f} m by more than "
+                    f"{self.config.floor_sanity_diff:.2f} m — check the mount / "
+                    f"cam_height_prior config"
+                )
+            return h
+        return float(self.config.cam_height_prior)
+
+    # ------------------------------------------------------------ depth frame
 
     def _on_depth(self, img: Image) -> None:  # noqa: C901
         with self._lock:
@@ -176,33 +263,54 @@ class StereoPointCloud(Module):
         depth = img.data
         if hasattr(depth, "get"):
             depth = depth.get()
+        depth = np.asarray(depth)
         if depth.ndim == 3:
             depth = depth[:, :, 0]
+
+        H_full, W_full = depth.shape
+        stride = max(1, int(self.config.pixel_stride))
+        if stride > 1:
+            depth = depth[::stride, ::stride]
+
         depth = depth.astype(np.float32)
         valid_d = depth[depth > 0]
-        is_mm = len(valid_d) > 0 and np.median(valid_d) > _DEPTH_MM_THRESHOLD
+        if len(valid_d) == 0:
+            return
+        is_mm = np.median(valid_d) > _DEPTH_MM_THRESHOLD
         if is_mm:
             depth /= 1000.0
         invalid = (depth <= 0) | (depth < self.config.min_depth) | (depth > self.config.max_depth)
         depth[invalid] = np.nan
 
-        H, W = depth.shape
+        # Intrinsics — scaled if the image resolution differs from the
+        # CameraInfo resolution (e.g. an upstream decimation filter).
         if info is not None:
             K = info.get_K_matrix()
             fx, fy, cx, cy = float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2])
+            info_w = int(getattr(info, "width", 0) or 0)
+            info_h = int(getattr(info, "height", 0) or 0)
+            if info_w and info_w != W_full:
+                s = W_full / info_w
+                fx, cx = fx * s, cx * s
+            if info_h and info_h != H_full:
+                s = H_full / info_h
+                fy, cy = fy * s, cy * s
         else:
             if not self._warned_no_intrinsics:
-                logger.warning("StereoPointCloud: no camera intrinsics — falling back to rough guess, check depth_camera_info is connected")
+                logger.warning(
+                    "StereoPointCloud: no camera intrinsics — falling back to rough "
+                    "guess, check depth_camera_info is connected"
+                )
                 self._warned_no_intrinsics = True
-            fx = fy = float(max(H, W)) / 2.0
-            cx, cy  = W / 2.0, H / 2.0
+            fx = fy = float(max(H_full, W_full)) / 2.0
+            cx, cy  = W_full / 2.0, H_full / 2.0
 
         stable = _gradient_mask(depth, self.config.gradient_threshold)
         valid  = np.isfinite(depth) & stable
         if not valid.any():
             return
 
-        uu, vv  = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32))
+        uu, vv  = self._uv_grid(H_full, W_full, stride)
         dd      = depth[valid]
         xyz_opt = np.column_stack([
             (uu[valid] - cx) * dd / fx,
@@ -210,95 +318,86 @@ class StereoPointCloud(Module):
             dd,
         ]).astype(np.float32)
 
+        # Orientation: roll/pitch from Madgwick (gravity); yaw fixed at 0.
         with self._imu_lock:
-            R = self._madgwick.R.copy() if self._madgwick is not None else np.eye(3, dtype=np.float32)
-        t = self._odom.t
+            R_tilt = (
+                self._madgwick.R_rollpitch_only()
+                if (self._madgwick is not None and self._madgwick_seeded)
+                else np.eye(3, dtype=np.float32)
+            )
 
-        xyz_cam   = xyz_opt @ _R_OPT_TO_LINK.T
-        xyz_world = (xyz_cam @ R.T + t).astype(np.float32)
-        cam_z     = float(t[2])
+        xyz_cam  = xyz_opt @ _R_OPT_TO_LINK.T
+        xyz_grav = (xyz_cam @ R_tilt.T).astype(np.float32)  # gravity-aligned, camera-centered
 
-        self._floor_calib.update(xyz_cam)
+        # Floor calibration runs in the gravity-aligned frame — mount pitch
+        # does not affect it.
+        self._floor_calib.update(xyz_grav)
+        h = self._cam_height()
 
-        # Motion detection: track ICP translation change between frames
-        t_delta       = float(np.linalg.norm(t - self._last_t))
-        self._last_t  = t.copy()
-        is_moving     = t_delta > 0.01  # 1 cm per frame = camera is moving
+        cam_pos = np.array([0.0, 0.0, h], dtype=np.float32)
 
-        # Remove floor and everything below it — threshold keeps only points above floor plane
-        if self._floor_calib.ready:
-            above_floor = xyz_cam[:, 2] > self._floor_calib.floor_z + self.config.global_floor_margin
-            xyz_cam     = xyz_cam[above_floor]
-            xyz_world   = xyz_world[above_floor]
+        # World frame: z = 0 at the floor (dimos-wide convention).
+        xyz_world = (xyz_grav + cam_pos).astype(np.float32)
 
-        if not len(xyz_world):
-            self._frame += 1
-            return
-
+        # ---- per-frame voxel cloud (floor KEPT — height_cost needs it) ----
         vk       = np.floor(xyz_world / self.config.vox_size).astype(np.int32)
         _, first = np.unique(_pack(vk), return_index=True)
         xyz_vox  = xyz_world[first]
-
-        # Shift Z so floor aligns with the Rerun grid (bridge sets grid at Z=0.5 in world frame)
-        # cam_height lifts floor from negative camera-link Z to Z=0; +0.5 puts it on the grid
-        cam_height  = self._floor_calib.cam_height if self._floor_calib.ready else 0.0
-        z_shift     = cam_height + 0.5
-        xyz_pub     = xyz_vox.copy()
-        xyz_pub[:, 2] += z_shift
         self.frame_cloud.publish(
-            PointCloud2.from_numpy(xyz_pub, frame_id=self.config.world_frame, timestamp=img.ts)
+            PointCloud2.from_numpy(xyz_vox, frame_id=self.config.world_frame, timestamp=img.ts)
         )
 
-        if len(xyz_cam) >= PointCloudOdometry.MIN_PTS:
-            self._odom.update(xyz_cam, R)
+        # ---- global map: log-odds hits + raycast misses, world frame ----
+        rel  = xyz_vox - cam_pos
+        near = np.einsum("ij,ij->i", rel, rel) <= self.config.mapping_range ** 2
+        map_pts = xyz_vox[near]
 
-        if not self._floor_calib.ready:
-            self._frame += 1
-            return
+        self._frame += 1
+        gvox = self.config.global_vox_size
+        hit_keys = (
+            np.unique(_pack(np.floor(map_pts / gvox).astype(np.int32)))
+            if len(map_pts)
+            else np.empty(0, dtype=np.int64)
+        )
+        with self._map_lock:
+            # Projective clearing: test every stored voxel in the frustum
+            # against the measured depth at its pixel. ``depth`` here is the
+            # strided image in meters with NaN for invalid pixels — dropout
+            # pixels therefore contribute no clearing evidence.
+            free_keys = _projective_miss_keys(
+                self._voxmap.keys,
+                gvox,
+                depth,
+                fx,
+                fy,
+                cx,
+                cy,
+                stride,
+                R_tilt.astype(np.float32),
+                cam_pos,
+                self.config.mapping_range,
+                min_margin=self.config.clear_min_margin,
+            )
+            self._voxmap.update(hit_keys, free_keys)
 
-        if not self._map_ready:
-            self._map_ready = True
-            logger.info(f"StereoPointCloud: floor calibrated — Z ≈ {self._floor_calib.floor_z:.3f} m, map started")
-
-        # Skip map accumulation while camera is moving to avoid ronly-frame drift artifacts
-        if is_moving:
-            self._frame += 1
-            return
-
-        # Rotation-only frame: strip ICP translation so ±2 cm t-noise doesn't shift voxel keys
-        xyz_ronly  = xyz_vox - t
-        vk_r       = np.floor(xyz_ronly / self.config.vox_size).astype(np.int32)
-        _, first_r = np.unique(_pack(vk_r), return_index=True)
-        xyz_for_map = xyz_ronly[first_r]
-
-        pts_snap = None
-        with self._lock:
-            if len(self._acc_pts) > 0 and len(xyz_for_map) > 0:
-                free_keys = _raycast_free_keys(xyz_for_map, self.config.global_vox_size)
-                if len(free_keys):
-                    keys_acc      = _pack(np.floor(self._acc_pts / self.config.global_vox_size).astype(np.int32))
-                    self._acc_pts = self._acc_pts[~np.isin(keys_acc, free_keys)]
-
-            if len(xyz_for_map):
-                self._acc_pts = (
-                    np.vstack([self._acc_pts, xyz_for_map]) if len(self._acc_pts) else xyz_for_map.copy()
+        with self._map_lock:
+            if self._frame % self.config.prune_every == 0:
+                self._voxmap.prune(
+                    cam_pos,
+                    self.config.map_radius,
+                    self.config.global_vox_size,
+                    self.config.max_global_pts,
                 )
-                _, ui         = np.unique(
-                    _pack(np.floor(self._acc_pts / self.config.global_vox_size).astype(np.int32)),
-                    return_index=True,
-                )
-                self._acc_pts = self._acc_pts[ui]
-                if len(self._acc_pts) > self.config.max_global_pts:
-                    keep_idx      = np.random.choice(len(self._acc_pts), self.config.max_global_pts, replace=False)
-                    self._acc_pts = self._acc_pts[keep_idx]
+            occ = (
+                self._voxmap.occupied_keys()
+                if self._frame % self.config.publish_every == 0
+                else None
+            )
 
-            self._frame += 1
-            if self._frame % self.config.publish_every == 0 and len(self._acc_pts):
-                pts_snap = self._acc_pts.copy()
-
-        if pts_snap is not None:
-            pts_pub = pts_snap.copy()
-            pts_pub[:, 2] += self._floor_calib.cam_height + 0.5
+        if occ is not None and len(occ):
+            centers = _unpack_centers(occ, self.config.global_vox_size)
             self.global_map.publish(
-                PointCloud2.from_numpy(pts_pub, frame_id=self.config.world_frame, timestamp=img.ts)
+                PointCloud2.from_numpy(
+                    centers, frame_id=self.config.world_frame, timestamp=img.ts
+                )
             )

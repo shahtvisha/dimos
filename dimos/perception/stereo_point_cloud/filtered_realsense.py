@@ -12,8 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""RealSenseCamera subclass that applies rs.spatial_filter + rs.hole_filling_filter
-before converting depth frames to numpy — identical to the original realsense_stereo_nav.py."""
+"""RealSenseCamera subclass that applies rs.spatial_filter + rs.temporal_filter
+before converting depth frames to numpy.
+
+Why temporal instead of hole_filling: hole filling *invents* depth at edges
+and dropouts, producing phantom points (including below the true floor) that
+corrupt both floor calibration and occupancy mapping. Temporal averaging
+instead reduces depth sigma by roughly sqrt(N) on static scenes — which is
+what buys the ~1.5 cm height resolution needed to see a thin mat. Sparsity
+left by NOT hole-filling is handled downstream by the gradient mask, voxel
+dedup, and the log-odds map.
+"""
 
 from __future__ import annotations
 
@@ -27,13 +36,13 @@ from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 
 
 class FilteredRealSenseCamera(RealSenseCamera):
-    """Adds rs.spatial_filter + rs.hole_filling_filter to depth frames before publishing."""
+    """Adds rs.spatial_filter + rs.temporal_filter to depth frames before publishing."""
 
     def _capture_loop(self) -> None:
         import pyrealsense2 as rs
 
-        spatial_filter   = rs.spatial_filter()
-        hole_fill_filter = rs.hole_filling_filter()
+        spatial_filter  = rs.spatial_filter()
+        temporal_filter = rs.temporal_filter()
 
         while self._running and self._pipeline is not None:
             try:
@@ -51,7 +60,7 @@ class FilteredRealSenseCamera(RealSenseCamera):
 
             if depth_frame:
                 depth_frame = spatial_filter.process(depth_frame)
-                depth_frame = hole_fill_filter.process(depth_frame)
+                depth_frame = temporal_filter.process(depth_frame)
 
             color_img = None
             if color_frame:

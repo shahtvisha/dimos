@@ -36,10 +36,14 @@ from dimos.control.components import (
 from dimos.control.coordinator import ControlCoordinator, TaskConfig
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.hardware.sensors.lidar.fastlio2.module import FastLio2
-from dimos.perception.stereo_point_cloud.filtered_realsense import FilteredRealSenseCamera
 from dimos.mapping.costmapper import CostMapper
+from dimos.mapping.pointclouds.occupancy import HeightCostConfig
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Transform import Transform
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.navigation.cmu_nav.main import cmu_nav_rerun_config, create_cmu_nav
 from dimos.navigation.movement_manager.movement_manager import MovementManager
+from dimos.perception.stereo_point_cloud.filtered_realsense import FilteredRealSenseCamera
 from dimos.perception.stereo_point_cloud.module import StereoPointCloud
 from dimos.robot.unitree.g1.config import G1_LOCAL_PLANNER_PRECOMPUTED_PATHS
 from dimos.robot.unitree.keyboard_teleop import KeyboardTeleop
@@ -205,7 +209,7 @@ coordinator_mobile_manip_mock = ControlCoordinator.blueprint(
         TaskConfig(
             name="traj_arm",
             type="trajectory",
-            joint_names=_mock_arm_hw.joints,
+            joint_names=make_joints("arm", 7),
             priority=10,
         ),
         TaskConfig(
@@ -218,12 +222,45 @@ coordinator_mobile_manip_mock = ControlCoordinator.blueprint(
 ).remappings([(ControlCoordinator, "twist_command", "cmd_vel")])
 
 
-# FlowBase + RealSense D435i stereo depth + CostMapper + nav stack
+# FlowBase + RealSense D435i stereo depth + CostMapper + nav stack.
+#
+# Wiring (autoconnect matches In/Out channel names):
+#   FilteredRealSenseCamera.depth_image / depth_camera_info → StereoPointCloud
+#   StereoPointCloud.global_map                             → CostMapper
+#
+# Set STEREO_CAM_HEIGHT to the actual mount height (meters). It is used as
+# the floor-datum prior until in-band calibration converges, and afterwards
+# as a sanity check.
+_STEREO_CAM_HEIGHT = float(os.getenv("STEREO_CAM_HEIGHT", "1.0"))
+
 coordinator_flowbase_stereo_nav = (
     autoconnect(
-        FilteredRealSenseCamera.blueprint(enable_depth=True, enable_pointcloud=False),
-        StereoPointCloud.blueprint(),
-        CostMapper.blueprint(),
+        FilteredRealSenseCamera.blueprint(
+            enable_depth=True,
+            enable_pointcloud=False,
+            # Declares the mount in TF (base_link → camera_link): 1 m mast,
+            # level. Update translation/rotation if the mount changes.
+            base_transform=Transform(
+                translation=Vector3(0.0, 0.0, _STEREO_CAM_HEIGHT),
+                rotation=Quaternion(0.0, 0.0, 0.0, 1.0),
+            ),
+        ),
+        StereoPointCloud.blueprint(cam_height_prior=_STEREO_CAM_HEIGHT),
+        CostMapper.blueprint(
+            algo="height_cost",
+            # Tightened for thin-obstacle (mat/threshold) sensitivity:
+            # a 2 cm step over one 4 cm cell → cost 50, ≥4 cm → cost 100.
+            # If floors are uneven and false obstacles appear, raise
+            # ignore_noise to 0.02 and can_climb to 0.06.
+            config=HeightCostConfig(
+                resolution=0.04,
+                ignore_noise=0.015,
+                can_climb=0.04,
+            ),
+            # Level camera at 1 m first sees the floor at ~1.8 m — mark the
+            # blind zone under the base as free at startup.
+            initial_safe_radius_meters=0.5,
+        ),
         MovementManager.blueprint(),
         ControlCoordinator.blueprint(
             hardware=[_flowbase_twist_base()],

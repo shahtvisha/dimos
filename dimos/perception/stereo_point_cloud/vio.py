@@ -12,7 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Visual-inertial odometry: Madgwick AHRS + rotation-decoupled ICP."""
+"""Orientation estimation: Madgwick AHRS (roll/pitch) for depth registration.
+
+Yaw and translation come from FlowBase wheel odometry (see
+``flowbase_odometry.py``) — gyro-integrated yaw drifts 1-3 deg/min with no
+magnetometer, while wheel yaw is drift-free at standstill. The Madgwick filter
+here is used ONLY for gravity alignment (roll/pitch) via
+:meth:`MadgwickFilter.R_rollpitch_only`.
+
+``PointCloudOdometry`` (frame-to-frame ICP) is kept for optional scan-to-map
+refinement experiments but is no longer the source of translation: mean-shift
+point-to-point ICP cannot observe translation along self-similar geometry
+(corridors), which made it unusable on a moving base.
+"""
 
 from __future__ import annotations
 
@@ -20,7 +32,6 @@ import threading
 
 import numpy as np
 from scipy.spatial import cKDTree
-
 
 _MAX_DT_S        = 0.1  # don't integrate more than 100ms at once — big gaps would blow up the filter
 _ACCEL_MIN_NORM  = 0.5  # skip accel correction if reading is basically zero (noise or free-fall)
@@ -34,6 +45,46 @@ class MadgwickFilter:
         self._q      = np.array([1., 0., 0., 0.], dtype=np.float64)
         self._beta   = beta
         self._t_prev: float | None = None
+        self._initialized = False
+
+    def init_from_accel(self, accel: np.ndarray) -> None:
+        """One-shot roll/pitch seed from a gravity sample.
+
+        beta=0.033 takes tens of seconds to converge from identity when the
+        mount is tilted; seeding makes R gravity-correct immediately, so floor
+        calibration (frames 30-60) runs on a valid orientation.
+
+        Convention check: for identity q the filter's accel objective expects
+        a_link_normalized == [0, 0, +1], so we seed with the quaternion that
+        rotates the measured accel direction onto +Z.
+        """
+        a_n = float(np.linalg.norm(accel))
+        if a_n < _ACCEL_MIN_NORM:
+            return
+        a = np.asarray(accel, dtype=np.float64) / a_n
+        v = np.array([0.0, 0.0, 1.0])
+        c = float(np.dot(a, v))
+        axis = np.cross(a, v)
+        s = float(np.linalg.norm(axis))
+        if s < 1e-8:
+            # already aligned (or anti-aligned: flip around X)
+            self._q = (
+                np.array([1.0, 0.0, 0.0, 0.0])
+                if c > 0
+                else np.array([0.0, 1.0, 0.0, 0.0])
+            )
+        else:
+            axis /= s
+            half = np.arctan2(s, c) / 2.0
+            self._q = np.array(
+                [np.cos(half), *(np.sin(half) * axis)], dtype=np.float64
+            )
+        self._q /= np.linalg.norm(self._q)
+        self._initialized = True
+
+    @property
+    def initialized(self) -> bool:
+        return self._initialized
 
     def update(self, gyro: np.ndarray, accel: np.ndarray, t: float) -> None:
         if self._t_prev is None:
@@ -80,9 +131,28 @@ class MadgwickFilter:
             [2*(q1*q3-q0*q2),   2*(q2*q3+q0*q1),   1-2*(q1**2+q2**2)],
         ], dtype=np.float32)
 
+    def R_rollpitch_only(self) -> np.ndarray:
+        """Gravity tilt with the (drifting) gyro yaw removed.
+
+        Yaw is supplied by wheel odometry instead; composing
+        ``R_z(yaw_wheel) @ R_rollpitch_only()`` gives the full camera_link →
+        world rotation.
+        """
+        R = self.R
+        yaw = float(np.arctan2(R[1, 0], R[0, 0]))
+        c, s = np.cos(-yaw), np.sin(-yaw)
+        Rz = np.array(
+            [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32
+        )
+        return (Rz @ R).astype(np.float32)
+
 
 class PointCloudOdometry:
-    """Rotation-decoupled ICP for translation t. Takes R from Madgwick, converges in 3-4 iters."""
+    """Rotation-decoupled ICP for translation t.
+
+    LEGACY / OPTIONAL: no longer used as the translation source (wheel odometry
+    is — see module.py). Retained for scan-to-map refinement experiments.
+    """
 
     ITERS    = 4
     MAX_DIST = 0.40
