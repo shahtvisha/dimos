@@ -50,7 +50,7 @@ class Config(ModuleConfig):
     vox_size: float           = 0.020
     global_vox_size: float    = 0.020
     floor_margin: float       = 0.03
-    global_floor_margin: float = 0.02
+    global_floor_margin: float = 0.03
     max_global_pts: int       = 500_000
     publish_every: int        = 1
     world_frame: str          = "world"
@@ -219,12 +219,11 @@ class StereoPointCloud(Module):
 
         self._floor_calib.update(xyz_cam)
 
-        # Per-frame floor filter disabled — calibration cuts obstacles at wrong height.
-        # Floor is removed by the global map filter below; frame cloud shows all points.
-        # if self._floor_calib.ready:
-        #     keep = xyz_cam[:, 2] > (self._floor_calib.floor_z + self.config.floor_margin)
-        # else:
-        #     keep = np.ones(len(xyz_cam), dtype=bool)
+        # Filter floor in camera_link frame — where calibration is defined, works at any pose
+        if self._floor_calib.ready:
+            keep      = xyz_cam[:, 2] > self._floor_calib.floor_z + self.config.global_floor_margin
+            xyz_cam   = xyz_cam[keep]
+            xyz_world = xyz_world[keep]
 
         xyz_world_kept = xyz_world
         xyz_cam_kept   = xyz_cam
@@ -248,15 +247,11 @@ class StereoPointCloud(Module):
             return
 
         if not self._map_ready:
-            self._map_ready     = True
-            self._world_floor_z = cam_z + self._floor_calib.floor_z
-            logger.info(f"StereoPointCloud: global map started — floor at Z ≈ {self._world_floor_z:.3f} m")
-
-        # Filter floor in world frame (where _world_floor_z is defined — no t drift issue)
-        xyz_world_for_map = xyz_vox[xyz_vox[:, 2] > self._world_floor_z + self.config.global_floor_margin]
+            self._map_ready = True
+            logger.info(f"StereoPointCloud: floor calibrated — Z ≈ {self._floor_calib.floor_z:.3f} m, map started")
 
         # Rotation-only frame: strip ICP translation so ±2 cm t-noise doesn't shift voxel keys
-        xyz_ronly  = xyz_world_for_map - t
+        xyz_ronly  = xyz_vox - t
         vk_r       = np.floor(xyz_ronly / self.config.vox_size).astype(np.int32)
         _, first_r = np.unique(_pack(vk_r), return_index=True)
         xyz_for_map = xyz_ronly[first_r]
