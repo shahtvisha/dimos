@@ -225,11 +225,11 @@ class StereoPointCloud(Module):
         self._last_t  = t.copy()
         is_moving     = t_delta > 0.01  # 1 cm per frame = camera is moving
 
-        # Remove only the floor plane (band filter) once calibrated — applies to both outputs
+        # Remove floor and everything below it — threshold keeps only points above floor plane
         if self._floor_calib.ready:
-            not_floor = np.abs(xyz_cam[:, 2] - self._floor_calib.floor_z) > self.config.global_floor_margin
-            xyz_cam   = xyz_cam[not_floor]
-            xyz_world = xyz_world[not_floor]
+            above_floor = xyz_cam[:, 2] > self._floor_calib.floor_z + self.config.global_floor_margin
+            xyz_cam     = xyz_cam[above_floor]
+            xyz_world   = xyz_world[above_floor]
 
         if not len(xyz_world):
             self._frame += 1
