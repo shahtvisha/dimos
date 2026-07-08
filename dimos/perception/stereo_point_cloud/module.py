@@ -50,7 +50,7 @@ class Config(ModuleConfig):
     vox_size: float           = 0.020
     global_vox_size: float    = 0.020
     floor_margin: float       = 0.03
-    global_floor_margin: float = 0.04
+    global_floor_margin: float = 0.02
     max_global_pts: int       = 500_000
     publish_every: int        = 1
     world_frame: str          = "world"
@@ -252,13 +252,14 @@ class StereoPointCloud(Module):
             self._world_floor_z = cam_z + self._floor_calib.floor_z
             logger.info(f"StereoPointCloud: global map started — floor at Z ≈ {self._world_floor_z:.3f} m")
 
+        # Filter floor in world frame (where _world_floor_z is defined — no t drift issue)
+        xyz_world_for_map = xyz_vox[xyz_vox[:, 2] > self._world_floor_z + self.config.global_floor_margin]
+
         # Rotation-only frame: strip ICP translation so ±2 cm t-noise doesn't shift voxel keys
-        xyz_ronly  = xyz_vox - t
+        xyz_ronly  = xyz_world_for_map - t
         vk_r       = np.floor(xyz_ronly / self.config.vox_size).astype(np.int32)
         _, first_r = np.unique(_pack(vk_r), return_index=True)
-        xyz_vox_r  = xyz_ronly[first_r]
-        floor_z_ronly = self._world_floor_z - t[2]
-        xyz_for_map = xyz_vox_r[xyz_vox_r[:, 2] > floor_z_ronly + self.config.global_floor_margin]
+        xyz_for_map = xyz_ronly[first_r]
 
         pts_snap = None
         with self._lock:
