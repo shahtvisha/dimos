@@ -82,6 +82,7 @@ class StereoPointCloud(Module):
         self._acc_pts: np.ndarray        = np.empty((0, 3), dtype=np.float32)
         self._map_ready                  = False
         self._world_floor_z: float       = 0.0
+        self._last_t: np.ndarray         = np.zeros(3, dtype=np.float32)
         self._frame                      = 0
         self._warned_no_intrinsics       = False
 
@@ -219,22 +220,31 @@ class StereoPointCloud(Module):
 
         self._floor_calib.update(xyz_cam)
 
-        xyz_world_kept = xyz_world
-        xyz_cam_kept   = xyz_cam
-        if not len(xyz_world_kept):
+        # Motion detection: track ICP translation change between frames
+        t_delta       = float(np.linalg.norm(t - self._last_t))
+        self._last_t  = t.copy()
+        is_moving     = t_delta > 0.01  # 1 cm per frame = camera is moving
+
+        # Remove only the floor plane (band filter) once calibrated — applies to both outputs
+        if self._floor_calib.ready:
+            not_floor = np.abs(xyz_cam[:, 2] - self._floor_calib.floor_z) > self.config.global_floor_margin
+            xyz_cam   = xyz_cam[not_floor]
+            xyz_world = xyz_world[not_floor]
+
+        if not len(xyz_world):
             self._frame += 1
             return
 
-        vk       = np.floor(xyz_world_kept / self.config.vox_size).astype(np.int32)
+        vk       = np.floor(xyz_world / self.config.vox_size).astype(np.int32)
         _, first = np.unique(_pack(vk), return_index=True)
-        xyz_vox  = xyz_world_kept[first]
+        xyz_vox  = xyz_world[first]
 
         self.frame_cloud.publish(
             PointCloud2.from_numpy(xyz_vox, frame_id=self.config.world_frame, timestamp=img.ts)
         )
 
-        if len(xyz_cam_kept) >= PointCloudOdometry.MIN_PTS:
-            self._odom.update(xyz_cam_kept, R)
+        if len(xyz_cam) >= PointCloudOdometry.MIN_PTS:
+            self._odom.update(xyz_cam, R)
 
         if not self._floor_calib.ready:
             self._frame += 1
@@ -244,13 +254,13 @@ class StereoPointCloud(Module):
             self._map_ready = True
             logger.info(f"StereoPointCloud: floor calibrated — Z ≈ {self._floor_calib.floor_z:.3f} m, map started")
 
-        # Remove only the floor plane — band filter keeps everything above AND below floor
-        floor_z   = self._floor_calib.floor_z
-        not_floor = np.abs(xyz_cam_kept[:, 2] - floor_z) > self.config.global_floor_margin
-        xyz_map_world = xyz_world_kept[not_floor]
+        # Skip map accumulation while camera is moving to avoid ronly-frame drift artifacts
+        if is_moving:
+            self._frame += 1
+            return
 
         # Rotation-only frame: strip ICP translation so ±2 cm t-noise doesn't shift voxel keys
-        xyz_ronly  = xyz_map_world - t
+        xyz_ronly  = xyz_vox - t
         vk_r       = np.floor(xyz_ronly / self.config.vox_size).astype(np.int32)
         _, first_r = np.unique(_pack(vk_r), return_index=True)
         xyz_for_map = xyz_ronly[first_r]
