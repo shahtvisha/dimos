@@ -49,8 +49,8 @@ class Config(ModuleConfig):
     gradient_threshold: float = 0.30
     vox_size: float           = 0.020
     global_vox_size: float    = 0.020
-    floor_margin: float       = 0.03
-    global_floor_margin: float = 0.03
+    floor_margin: float       = 0.005
+    global_floor_margin: float = 0.005
     max_global_pts: int       = 500_000
     publish_every: int        = 1
     world_frame: str          = "world"
