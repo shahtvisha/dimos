@@ -50,7 +50,6 @@ from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.perception.stereo_point_cloud.utils import (
     _R_OPT_TO_LINK,
     LogOddsVoxelMap,
-    _FloorCalibrator,
     _gradient_mask,
     _pack,
     _projective_miss_keys,
@@ -79,10 +78,7 @@ class Config(ModuleConfig):
     publish_every: int        = 2
     world_frame: str          = "world"
     madgwick_beta: float      = 0.033
-    # camera mount height prior (m). Used until floor calibration converges,
-    # and as a sanity check afterwards. Set to the actual mount height.
     cam_height_prior: float   = 1.0
-    floor_sanity_diff: float  = 0.15
     # projective clearing: a stored voxel is a 'miss' when the measured depth
     # at its pixel is behind it by max(clear_min_margin, 3 * sigma_z(range))
     clear_min_margin: float   = 0.06
@@ -108,7 +104,6 @@ class StereoPointCloud(Module):
         super().__init__(**kwargs)
         self._lock                       = threading.Lock()
         self._latest_info: CameraInfo | None = None
-        self._floor_calib                = _FloorCalibrator()
         self._madgwick: MadgwickFilter | None = None
         self._imu_lock                   = threading.Lock()
         self._last_accel                 = np.array([0.0, 0.0, -9.81], dtype=np.float32)
@@ -120,8 +115,6 @@ class StereoPointCloud(Module):
         self._uv_cache: dict[tuple[int, int, int], tuple[np.ndarray, np.ndarray]] = {}
         self._frame                      = 0
         self._warned_no_intrinsics       = False
-        self._warned_floor_sanity        = False
-        self._logged_calibrated          = False
 
     # ------------------------------------------------------------------ setup
 
@@ -232,27 +225,6 @@ class StereoPointCloud(Module):
             grids = (uu, vv)
             self._uv_cache[key] = grids
         return grids
-
-    def _cam_height(self) -> float:
-        """Calibrated camera height above floor, falling back to the prior."""
-        if self._floor_calib.ready:
-            h = float(self._floor_calib.cam_height)  # type: ignore[arg-type]
-            if not self._logged_calibrated:
-                self._logged_calibrated = True
-                logger.info(f"StereoPointCloud: using calibrated camera height {h:.3f} m")
-            if (
-                abs(h - self.config.cam_height_prior) > self.config.floor_sanity_diff
-                and not self._warned_floor_sanity
-            ):
-                self._warned_floor_sanity = True
-                logger.warning(
-                    f"StereoPointCloud: calibrated height {h:.3f} m differs from "
-                    f"prior {self.config.cam_height_prior:.3f} m by more than "
-                    f"{self.config.floor_sanity_diff:.2f} m — check the mount / "
-                    f"cam_height_prior config"
-                )
-            return h
-        return float(self.config.cam_height_prior)
 
     # ------------------------------------------------------------ depth frame
 
