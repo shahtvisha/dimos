@@ -239,8 +239,12 @@ class StereoPointCloud(Module):
         _, first = np.unique(_pack(vk), return_index=True)
         xyz_vox  = xyz_world[first]
 
+        # Shift Z so floor = 0 in Rerun (camera starts at cam_height above ground)
+        cam_height = self._floor_calib.cam_height if self._floor_calib.ready else 0.0
+        xyz_pub    = xyz_vox.copy()
+        xyz_pub[:, 2] += cam_height
         self.frame_cloud.publish(
-            PointCloud2.from_numpy(xyz_vox, frame_id=self.config.world_frame, timestamp=img.ts)
+            PointCloud2.from_numpy(xyz_pub, frame_id=self.config.world_frame, timestamp=img.ts)
         )
 
         if len(xyz_cam) >= PointCloudOdometry.MIN_PTS:
@@ -291,6 +295,8 @@ class StereoPointCloud(Module):
                 pts_snap = self._acc_pts.copy()
 
         if pts_snap is not None:
+            pts_pub = pts_snap.copy()
+            pts_pub[:, 2] += self._floor_calib.cam_height
             self.global_map.publish(
-                PointCloud2.from_numpy(pts_snap, frame_id=self.config.world_frame, timestamp=img.ts)
+                PointCloud2.from_numpy(pts_pub, frame_id=self.config.world_frame, timestamp=img.ts)
             )
