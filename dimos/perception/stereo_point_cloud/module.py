@@ -239,10 +239,12 @@ class StereoPointCloud(Module):
         _, first = np.unique(_pack(vk), return_index=True)
         xyz_vox  = xyz_world[first]
 
-        # Shift Z so floor = 0 in Rerun (camera starts at cam_height above ground)
-        cam_height = self._floor_calib.cam_height if self._floor_calib.ready else 0.0
-        xyz_pub    = xyz_vox.copy()
-        xyz_pub[:, 2] += cam_height
+        # Shift Z so floor aligns with the Rerun grid (bridge sets grid at Z=0.5 in world frame)
+        # cam_height lifts floor from negative camera-link Z to Z=0; +0.5 puts it on the grid
+        cam_height  = self._floor_calib.cam_height if self._floor_calib.ready else 0.0
+        z_shift     = cam_height + 0.5
+        xyz_pub     = xyz_vox.copy()
+        xyz_pub[:, 2] += z_shift
         self.frame_cloud.publish(
             PointCloud2.from_numpy(xyz_pub, frame_id=self.config.world_frame, timestamp=img.ts)
         )
@@ -296,7 +298,7 @@ class StereoPointCloud(Module):
 
         if pts_snap is not None:
             pts_pub = pts_snap.copy()
-            pts_pub[:, 2] += self._floor_calib.cam_height
+            pts_pub[:, 2] += self._floor_calib.cam_height + 0.5
             self.global_map.publish(
                 PointCloud2.from_numpy(pts_pub, frame_id=self.config.world_frame, timestamp=img.ts)
             )
