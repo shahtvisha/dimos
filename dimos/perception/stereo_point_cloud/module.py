@@ -334,7 +334,7 @@ class StereoPointCloud(Module):
         self._floor_calib.update(xyz_grav)
         h = self._cam_height()
 
-        cam_pos = np.array([0.0, 0.0, h + 0.5], dtype=np.float32)
+        cam_pos = np.array([0.0, 0.0, h + 1.0], dtype=np.float32)
 
         # World frame: z = 0 at the floor (dimos-wide convention).
         xyz_world = (xyz_grav + cam_pos).astype(np.float32)
