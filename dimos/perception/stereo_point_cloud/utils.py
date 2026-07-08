@@ -78,7 +78,8 @@ class _FloorCalibrator:
     FLOOR_MAX_Z      = -0.30
     FLOOR_MIN_Z      = -3.0
     FLOOR_MAX_DIST_M = 4.0
-    FLOOR_MIN_PTS    = 200
+    FLOOR_MIN_PTS    = 200   # min total points in mask to attempt calibration
+    FLOOR_BIN_PTS    = 20    # min points per bin to count as a significant surface
 
     def __init__(self) -> None:
         self._frame   = 0
@@ -105,7 +106,7 @@ class _FloorCalibrator:
             return
         bins          = np.arange(lo, hi + self.BIN_M, self.BIN_M)
         counts, edges = np.histogram(z_floor, bins=bins)
-        significant   = np.where(counts >= self.FLOOR_MIN_PTS)[0]
+        significant   = np.where(counts >= self.FLOOR_BIN_PTS)[0]
         if not len(significant):
             return
         self._samples.append(float(edges[significant[0]] + self.BIN_M / 2))
