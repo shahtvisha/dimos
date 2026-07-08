@@ -148,13 +148,14 @@ class _FloorCalibrator:
     (well above the lowest cluster).
     """
 
-    SKIP_FRAMES      = 30
-    CALIB_FRAMES     = 30
+    SKIP_FRAMES      = 5     # wait this many frames before collecting (IMU settle)
+    CALIB_FRAMES     = 20
     BIN_M            = 0.02
     MIN_CAM_HEIGHT   = 0.20   # floor must be ≥ 0.2 m below camera
     MAX_CAM_HEIGHT   = 3.0
     FLOOR_MAX_DIST_M = 4.0
-    FLOOR_MIN_PTS    = 200
+    FLOOR_MIN_PTS    = 200   # total floor-candidate points required per frame
+    FLOOR_BIN_PTS    = 20    # points required in a single 2 cm bin to be "significant"
     CLUSTER_BINS     = 3      # mode search window above lowest significant bin (6 cm)
 
     def __init__(self) -> None:
@@ -188,7 +189,7 @@ class _FloorCalibrator:
             return
         bins          = np.arange(lo, hi + self.BIN_M, self.BIN_M)
         counts, edges = np.histogram(zf, bins=bins)
-        significant   = np.where(counts >= self.FLOOR_MIN_PTS)[0]
+        significant   = np.where(counts >= self.FLOOR_BIN_PTS)[0]
         if not len(significant):
             return
         window = significant[significant <= significant[0] + self.CLUSTER_BINS]
