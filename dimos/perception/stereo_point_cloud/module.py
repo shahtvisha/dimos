@@ -329,10 +329,7 @@ class StereoPointCloud(Module):
         xyz_cam  = xyz_opt @ _R_OPT_TO_LINK.T
         xyz_grav = (xyz_cam @ R_tilt.T).astype(np.float32)  # gravity-aligned, camera-centered
 
-        # Floor calibration runs in the gravity-aligned frame — mount pitch
-        # does not affect it.
-        self._floor_calib.update(xyz_grav)
-        h = self._cam_height()
+        h = float(self.config.cam_height_prior)
 
         cam_pos = np.array([0.0, 0.0, h + 1.0], dtype=np.float32)
 
