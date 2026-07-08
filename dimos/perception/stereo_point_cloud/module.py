@@ -257,7 +257,8 @@ class StereoPointCloud(Module):
         vk_r       = np.floor(xyz_ronly / self.config.vox_size).astype(np.int32)
         _, first_r = np.unique(_pack(vk_r), return_index=True)
         xyz_vox_r  = xyz_ronly[first_r]
-        xyz_for_map = xyz_vox_r[xyz_vox_r[:, 2] > self._world_floor_z + self.config.global_floor_margin]
+        floor_z_ronly = self._world_floor_z - t[2]
+        xyz_for_map = xyz_vox_r[xyz_vox_r[:, 2] > floor_z_ronly + self.config.global_floor_margin]
 
         pts_snap = None
         with self._lock:
