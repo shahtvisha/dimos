@@ -42,18 +42,18 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from typing import Any
 
 import numpy as np
 import open3d as o3d  # type: ignore[import-untyped]
 from pydantic import Field
 from reactivex.disposable import Disposable
-import rerun as rr
 from scipy.spatial import cKDTree
 
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
-from dimos.core.stream import In
+from dimos.core.stream import In, Out
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.perception.stereo_point_cloud.utils import R_OPT_TO_LINK
 from dimos.utils.logging_config import setup_logger
@@ -198,6 +198,13 @@ class LidarStereoBenchmark(Module):
     realsense_raw: In[PointCloud2]
     stereo: In[PointCloud2]
 
+    # Published (not logged directly) so the shared RerunBridgeModule/vis_module
+    # picks these up the same way every other dimOS module does — no ad hoc rerun
+    # SDK calls here, matching the existing mid360/mid360-fastlio-voxels pattern.
+    vis_lidar: Out[PointCloud2]
+    vis_realsense_aligned: Out[PointCloud2]
+    vis_stereo_aligned: Out[PointCloud2]
+
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._lock = threading.Lock()
@@ -207,17 +214,6 @@ class LidarStereoBenchmark(Module):
     @rpc
     def start(self) -> None:
         super().start()
-        try:
-            rr.init("lidar_stereo_bench", spawn=False)
-            # serve_web_viewer() only serves the static frontend — it is NOT a log sink and
-            # does NOT host a gRPC server (see its docstring). Without serve_grpc() actually
-            # producing a data stream and being wired in via connect_to, the viewer has
-            # nothing to display even if it loads.
-            grpc_uri = rr.serve_grpc(grpc_port=9876)
-            rr.serve_web_viewer(web_port=9090, connect_to=grpc_uri, open_browser=False)
-            logger.info("LidarStereoBenchmark: rerun web viewer at http://<this-host>:9090 (data: %s)", grpc_uri)
-        except Exception:
-            logger.exception("LidarStereoBenchmark: rerun web viewer failed to start — continuing without it")
         self.register_disposable(Disposable(self.lidar.subscribe(lambda m: self._store("lidar", m))))
         self.register_disposable(
             Disposable(self.realsense_raw.subscribe(lambda m: self._store("realsense_raw", m)))
@@ -276,7 +272,7 @@ class LidarStereoBenchmark(Module):
             return
 
         lines = [f"lidar (ref): n={len(lidar_xyz)}"]
-        self._log_points("lidar", lidar_xyz, [255, 255, 255])
+        self._publish_vis(self.vis_lidar, lidar_xyz)
 
         # RealSense raw cloud is in optical convention (Z=depth, Y=down) — a known,
         # fixed rotation away from the lidar's body frame (Z=up) — plus an unknown heading.
@@ -288,7 +284,7 @@ class LidarStereoBenchmark(Module):
         rs_xyz = apply_matrix(rs_raw_xyz, rs_icp_T)
         rs_score = self._score(lidar_xyz, rs_xyz)
         lines.append(self._fmt("realsense (raw, ICP-aligned)", rs_score))
-        self._log_points("realsense_aligned", rs_xyz, [80, 160, 255])
+        self._publish_vis(self.vis_realsense_aligned, rs_xyz)
 
         if stereo_msg is not None:
             stereo_raw_xyz = stereo_msg.points_f32()
@@ -302,7 +298,7 @@ class LidarStereoBenchmark(Module):
                 stereo_xyz = apply_matrix(stereo_raw_xyz, stereo_icp_T)
                 stereo_score = self._score(lidar_xyz, stereo_xyz)
                 lines.append(self._fmt("stereo (ours, ICP-aligned)", stereo_score))
-                self._log_points("stereo_aligned", stereo_xyz, [255, 140, 60])
+                self._publish_vis(self.vis_stereo_aligned, stereo_xyz)
 
         origin = np.zeros(3, dtype=np.float32)
         lines.append(f"range-binned density {cfg.range_bins_m}: lidar={range_binned_density(lidar_xyz, origin, cfg.range_bins_m)} "
@@ -310,15 +306,12 @@ class LidarStereoBenchmark(Module):
 
         logger.info("LidarStereoBenchmark:\n  " + "\n  ".join(lines))
 
-    def _log_points(self, path: str, xyz: np.ndarray, color: list[int], cap: int = 40_000) -> None:
+    def _publish_vis(self, stream: Out[PointCloud2], xyz: np.ndarray, cap: int = 40_000) -> None:
         if len(xyz) == 0:
             return
         if len(xyz) > cap:
             xyz = xyz[np.random.choice(len(xyz), cap, replace=False)]
-        try:
-            rr.log(path, rr.Points3D(xyz, colors=[color], radii=0.02))
-        except Exception:
-            pass  # rerun viewer not available — metrics still work without it
+        stream.publish(PointCloud2.from_numpy(xyz, frame_id="bench", timestamp=time.time()))
 
     def _fmt(self, name: str, s: dict[str, float]) -> str:
         cfg = self.config
