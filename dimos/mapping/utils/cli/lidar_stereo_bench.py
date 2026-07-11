@@ -209,8 +209,13 @@ class LidarStereoBenchmark(Module):
         super().start()
         try:
             rr.init("lidar_stereo_bench", spawn=False)
-            rr.serve_web_viewer(open_browser=False)
-            logger.info("LidarStereoBenchmark: rerun web viewer serving — see console above for the URL/port")
+            # serve_web_viewer() only serves the static frontend — it is NOT a log sink and
+            # does NOT host a gRPC server (see its docstring). Without serve_grpc() actually
+            # producing a data stream and being wired in via connect_to, the viewer has
+            # nothing to display even if it loads.
+            grpc_uri = rr.serve_grpc(grpc_port=9876)
+            rr.serve_web_viewer(web_port=9090, connect_to=grpc_uri, open_browser=False)
+            logger.info("LidarStereoBenchmark: rerun web viewer at http://<this-host>:9090 (data: %s)", grpc_uri)
         except Exception:
             logger.exception("LidarStereoBenchmark: rerun web viewer failed to start — continuing without it")
         self.register_disposable(Disposable(self.lidar.subscribe(lambda m: self._store("lidar", m))))
