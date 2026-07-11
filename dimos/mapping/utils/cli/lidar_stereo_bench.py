@@ -174,6 +174,24 @@ def drop_near_field(points: np.ndarray, min_range: float) -> np.ndarray:
     return points[np.linalg.norm(points, axis=1) >= min_range]  # type: ignore[no-any-return]
 
 
+def crop_forward_cone(points: np.ndarray, half_angle_deg: float) -> np.ndarray:
+    """Keep only points within ``half_angle_deg`` of the +X (forward) axis.
+
+    The Mid-360 sees the full 360-degree room; the D435i only sees a narrow
+    (~87 degree) forward slice of it. Scoring/aligning the camera against the
+    *entire* lidar sphere is structurally wrong on two counts: completeness/IoU
+    are computed against points the camera could never see even with perfect
+    data, and ICP's correspondence search is degraded by the huge fraction of
+    lidar points with no valid camera match at all — both make results look
+    worse than the actual sensor data. Cropped generously (wider than the
+    D435i's real FOV) since the two sensors' exact relative heading isn't known.
+    """
+    if len(points) == 0:
+        return points
+    azimuth = np.degrees(np.arctan2(points[:, 1], points[:, 0]))
+    return points[np.abs(azimuth) <= half_angle_deg]  # type: ignore[no-any-return]
+
+
 # ── Module ──────────────────────────────────────────────────────────────────
 
 
@@ -185,6 +203,7 @@ class BenchConfig(ModuleConfig):
     voxel_size_m: float = 0.05
     icp_max_corr_dist_m: float = 0.25  # tighter now that a rough translation prior seeds the search
     min_lidar_range_m: float = 0.5  # drop near-field self-return noise (matches FAST-LIO2's `blind`)
+    forward_cone_half_angle_deg: float = 70.0  # crop lidar's 360-degree sphere to ~camera FOV
     yaw_steps: int = 12  # heading hypotheses swept per ICP call (30 degree steps)
     range_bins_m: list[float] = Field(default_factory=lambda: [0.0, 0.5, 1.0, 2.0, 4.0, 8.0, 100.0])
 
@@ -264,7 +283,13 @@ class LidarStereoBenchmark(Module):
 
         # Lidar is the reference frame — nothing to transform. Everything else is
         # ICP-aligned onto it (see module docstring: no calibrated extrinsic exists).
-        lidar_xyz = drop_near_field(lidar_msg.points_f32(), cfg.min_lidar_range_m)
+        # Cropped to a forward cone: the D435i only ever sees a narrow slice of the
+        # lidar's full 360-degree sphere, so scoring/aligning against the whole thing
+        # both misrepresents completeness/IoU and degrades ICP's correspondence search.
+        lidar_xyz = crop_forward_cone(
+            drop_near_field(lidar_msg.points_f32(), cfg.min_lidar_range_m),
+            cfg.forward_cone_half_angle_deg,
+        )
         rs_raw_xyz = rs_msg.points_f32()
         if len(lidar_xyz) < cfg.min_points or len(rs_raw_xyz) < cfg.min_points:
             logger.info("LidarStereoBenchmark: not enough points yet (lidar=%d realsense=%d)",

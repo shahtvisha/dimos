@@ -23,6 +23,7 @@ from dimos.mapping.utils.cli.lidar_stereo_bench import (
     apply_matrix,
     best_yaw_icp,
     chamfer_distance,
+    crop_forward_cone,
     drop_near_field,
     range_binned_density,
     voxel_occupancy_iou,
@@ -37,6 +38,9 @@ FSCORE_TIGHT_M = 0.05
 FSCORE_LOOSE_M = 0.20
 VOXEL_SIZE_M = 0.05
 RANGE_BINS_M = [0.0, 0.5, 1.0, 2.0, 4.0, 8.0, 100.0]
+# Generous vs. the D435i's ~87 degree horizontal FOV (43.5 degree half-angle) since
+# the two sensors' exact relative heading isn't known yet.
+FORWARD_CONE_HALF_ANGLE_DEG = 70.0
 
 # StereoPointCloud's position comes from its own VIO (ICP-based), which can drift
 # over a stationary robot the longer the recording runs — even without real motion
@@ -80,7 +84,10 @@ def _fmt_score(pred: np.ndarray, gt: np.ndarray) -> str:
 def main(db_path: str) -> None:
     with SqliteStore(path=db_path) as store:
         print(store.summary())
-        lidar_xyz = drop_near_field(_frame_near(store, "lidar", FRAME_OFFSET_S), MIN_LIDAR_RANGE_M)
+        lidar_xyz = crop_forward_cone(
+            drop_near_field(_frame_near(store, "lidar", FRAME_OFFSET_S), MIN_LIDAR_RANGE_M),
+            FORWARD_CONE_HALF_ANGLE_DEG,
+        )
         rs_raw_xyz = _frame_near(store, "realsense_raw", FRAME_OFFSET_S)
         stereo_raw_xyz = _frame_near(store, "stereo", FRAME_OFFSET_S)
 
