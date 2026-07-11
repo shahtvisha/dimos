@@ -101,6 +101,31 @@ def voxel_occupancy_iou(pred: np.ndarray, gt: np.ndarray, voxel_size: float) -> 
     return len(keys_pred & keys_gt) / union if union else 0.0
 
 
+def compute_score(
+    pred: np.ndarray, gt: np.ndarray, fscore_tight: float, fscore_loose: float, voxel_size: float
+) -> dict[str, float]:
+    """All metrics for one candidate cloud against the reference — shared by the
+    live module and the offline compare script so the two can't drift apart."""
+    acc_t, comp_t, f_t = accuracy_completeness_fscore(pred, gt, fscore_tight)
+    _, _, f_l = accuracy_completeness_fscore(pred, gt, fscore_loose)
+    return {
+        "n": len(pred),
+        "chamfer": chamfer_distance(pred, gt),
+        "acc_tight": acc_t, "comp_tight": comp_t, "f_tight": f_t,
+        "f_loose": f_l,
+        "iou": voxel_occupancy_iou(pred, gt, voxel_size),
+    }
+
+
+def format_score(name: str, s: dict[str, float], fscore_tight: float, fscore_loose: float, voxel_size: float) -> str:
+    return (
+        f"{name}: n={s['n']}  chamfer={s['chamfer']:.4f}  "
+        f"acc@{fscore_tight * 100:.0f}cm={s['acc_tight']:.2f}  comp@{fscore_tight * 100:.0f}cm={s['comp_tight']:.2f}  "
+        f"F@{fscore_tight * 100:.0f}cm={s['f_tight']:.2f}  F@{fscore_loose * 100:.0f}cm={s['f_loose']:.2f}  "
+        f"IoU@{voxel_size * 100:.0f}cm={s['iou']:.2f}"
+    )
+
+
 def range_binned_density(points: np.ndarray, origin: np.ndarray, bins: list[float]) -> list[int]:
     """Point count per distance-from-origin bin — density/accuracy falloff vs range (Newer College style)."""
     if len(points) == 0:
@@ -108,6 +133,48 @@ def range_binned_density(points: np.ndarray, origin: np.ndarray, bins: list[floa
     d = np.linalg.norm(points - origin, axis=1)
     counts, _ = np.histogram(d, bins=bins)
     return counts.tolist()  # type: ignore[no-any-return]
+
+
+def rms_from_chamfer(chamfer: float) -> float:
+    """Approximate a human-readable RMS error (meters) from the Chamfer distance.
+
+    ``chamfer_distance`` sums two mean-*squared*-distance terms (pred->gt and
+    gt->pred); dividing by 2 and taking the square root gives a single
+    representative RMS figure. It's an approximation for readability, not a
+    formal statistic.
+    """
+    return float(np.sqrt(max(chamfer, 0.0) / 2.0))
+
+
+def verdict_bucket(f_loose: float) -> str:
+    """Rough, unvalidated pass/fail bucket from the loose-threshold F-score — a
+    starting point for "is this even in the right ballpark", not a validated
+    downstream requirement."""
+    if f_loose >= 0.70:
+        return "GOOD"
+    if f_loose >= 0.40:
+        return "OK"
+    return "POOR"
+
+
+def format_verdict_report(lidar_n: int, scores: dict[str, dict[str, float]]) -> str:
+    """Plain-English summary: verdict bucket + headline numbers per candidate,
+    plus how much worse each is than the best candidate present."""
+    lines = [f"=== vs lidar (reference, forward-cone-cropped, n={lidar_n}) ==="]
+    best_f = max((s["f_loose"] for s in scores.values()), default=0.0)
+    for name, s in scores.items():
+        verdict = verdict_bucket(s["f_loose"])
+        rms = rms_from_chamfer(s["chamfer"])
+        rel = ""
+        if best_f > 0 and s["f_loose"] < best_f:
+            worse_by = (best_f - s["f_loose"]) / best_f * 100
+            rel = f" — {worse_by:.0f}% worse F-score than the best candidate here"
+        lines.append(
+            f"  {name:<28} {verdict:<4}  F@20cm={s['f_loose']:.2f}  "
+            f"(~{rms:.1f}m RMS error, IoU@5cm={s['iou']:.2f}){rel}"
+        )
+    lines.append("  (GOOD >= 0.70, OK >= 0.40, POOR below — rough rule of thumb, not a validated spec)")
+    return "\n".join(lines)
 
 
 def icp_refine(
@@ -260,15 +327,7 @@ class LidarStereoBenchmark(Module):
 
     def _score(self, gt_xyz: np.ndarray, pred_xyz: np.ndarray) -> dict[str, float]:
         cfg = self.config
-        acc_t, comp_t, f_t = accuracy_completeness_fscore(pred_xyz, gt_xyz, cfg.fscore_threshold_m)
-        acc_l, comp_l, f_l = accuracy_completeness_fscore(pred_xyz, gt_xyz, cfg.fscore_threshold_loose_m)
-        return {
-            "n": len(pred_xyz),
-            "chamfer": chamfer_distance(pred_xyz, gt_xyz),
-            "acc_tight": acc_t, "comp_tight": comp_t, "f_tight": f_t,
-            "f_loose": f_l,
-            "iou": voxel_occupancy_iou(pred_xyz, gt_xyz, cfg.voxel_size_m),
-        }
+        return compute_score(pred_xyz, gt_xyz, cfg.fscore_threshold_m, cfg.fscore_threshold_loose_m, cfg.voxel_size_m)
 
     def _evaluate(self) -> None:
         cfg = self.config
@@ -298,6 +357,7 @@ class LidarStereoBenchmark(Module):
 
         lines = [f"lidar (ref): n={len(lidar_xyz)}"]
         self._publish_vis(self.vis_lidar, lidar_xyz)
+        scores: dict[str, dict[str, float]] = {}
 
         # Each candidate is isolated in its own try/except — an ICP failure on one
         # (e.g. realsense) must not silently swallow the other (e.g. stereo) and
@@ -315,7 +375,11 @@ class LidarStereoBenchmark(Module):
             )
             rs_xyz = apply_matrix(rs_raw_xyz, rs_icp_T)
             rs_score = self._score(lidar_xyz, rs_xyz)
-            lines.append(self._fmt("realsense (raw, ICP-aligned)", rs_score))
+            scores["realsense (raw)"] = rs_score
+            lines.append(format_score(
+                "realsense (raw, ICP-aligned)", rs_score,
+                cfg.fscore_threshold_m, cfg.fscore_threshold_loose_m, cfg.voxel_size_m,
+            ))
             self._publish_vis(self.vis_realsense_aligned, rs_xyz)
         except Exception:
             logger.exception("LidarStereoBenchmark: realsense alignment/scoring failed")
@@ -332,7 +396,11 @@ class LidarStereoBenchmark(Module):
                     )
                     stereo_xyz = apply_matrix(stereo_raw_xyz, stereo_icp_T)
                     stereo_score = self._score(lidar_xyz, stereo_xyz)
-                    lines.append(self._fmt("stereo (ours, ICP-aligned)", stereo_score))
+                    scores["stereo (ours)"] = stereo_score
+                    lines.append(format_score(
+                        "stereo (ours, ICP-aligned)", stereo_score,
+                        cfg.fscore_threshold_m, cfg.fscore_threshold_loose_m, cfg.voxel_size_m,
+                    ))
                     self._publish_vis(self.vis_stereo_aligned, stereo_xyz)
                 except Exception:
                     logger.exception("LidarStereoBenchmark: stereo alignment/scoring failed")
@@ -342,6 +410,8 @@ class LidarStereoBenchmark(Module):
                      f"realsense={range_binned_density(rs_xyz, origin, cfg.range_bins_m)}")
 
         logger.info("LidarStereoBenchmark:\n  " + "\n  ".join(lines))
+        if scores:
+            logger.info(format_verdict_report(len(lidar_xyz), scores))
 
     def _publish_vis(self, stream: Out[PointCloud2], xyz: np.ndarray, cap: int = 40_000) -> None:
         if len(xyz) == 0:
@@ -349,14 +419,3 @@ class LidarStereoBenchmark(Module):
         if len(xyz) > cap:
             xyz = xyz[np.random.choice(len(xyz), cap, replace=False)]
         stream.publish(PointCloud2.from_numpy(xyz, frame_id="bench", timestamp=time.time()))
-
-    def _fmt(self, name: str, s: dict[str, float]) -> str:
-        cfg = self.config
-        return (
-            f"{name}: n={s['n']}  chamfer={s['chamfer']:.4f}  "
-            f"acc@{cfg.fscore_threshold_m*100:.0f}cm={s['acc_tight']:.2f}  "
-            f"comp@{cfg.fscore_threshold_m*100:.0f}cm={s['comp_tight']:.2f}  "
-            f"F@{cfg.fscore_threshold_m*100:.0f}cm={s['f_tight']:.2f}  "
-            f"F@{cfg.fscore_threshold_loose_m*100:.0f}cm={s['f_loose']:.2f}  "
-            f"IoU@{cfg.voxel_size_m*100:.0f}cm={s['iou']:.2f}"
-        )

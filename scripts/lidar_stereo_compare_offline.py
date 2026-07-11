@@ -19,14 +19,14 @@ import numpy as np
 from dimos.mapping.utils.cli.lidar_stereo_bench import (
     ROUGH_CAM_OFFSET_IN_LIDAR_FRAME,
     R_OPT_TO_LINK,
-    accuracy_completeness_fscore,
     apply_matrix,
     best_yaw_icp,
-    chamfer_distance,
+    compute_score,
     crop_forward_cone,
     drop_near_field,
+    format_score,
+    format_verdict_report,
     range_binned_density,
-    voxel_occupancy_iou,
 )
 from dimos.memory2.store.sqlite import SqliteStore
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
@@ -68,19 +68,6 @@ def _frame_near(store: SqliteStore, name: str, offset_s: float) -> np.ndarray:
     return best_obs.data.points_f32()
 
 
-def _fmt_score(pred: np.ndarray, gt: np.ndarray) -> str:
-    cd = chamfer_distance(pred, gt)
-    acc_t, comp_t, f_t = accuracy_completeness_fscore(pred, gt, FSCORE_TIGHT_M)
-    _, _, f_l = accuracy_completeness_fscore(pred, gt, FSCORE_LOOSE_M)
-    iou = voxel_occupancy_iou(pred, gt, VOXEL_SIZE_M)
-    return (
-        f"n={len(pred)}  chamfer={cd:.4f}  "
-        f"acc@{FSCORE_TIGHT_M * 100:.0f}cm={acc_t:.2f}  comp@{FSCORE_TIGHT_M * 100:.0f}cm={comp_t:.2f}  "
-        f"F@{FSCORE_TIGHT_M * 100:.0f}cm={f_t:.2f}  F@{FSCORE_LOOSE_M * 100:.0f}cm={f_l:.2f}  "
-        f"IoU@{VOXEL_SIZE_M * 100:.0f}cm={iou:.2f}"
-    )
-
-
 def main(db_path: str) -> None:
     with SqliteStore(path=db_path) as store:
         print(store.summary())
@@ -92,6 +79,7 @@ def main(db_path: str) -> None:
         stereo_raw_xyz = _frame_near(store, "stereo", FRAME_OFFSET_S)
 
     print(f"lidar (ref): n={len(lidar_xyz)}")
+    scores: dict[str, dict[str, float]] = {}
 
     rs_icp_T = best_yaw_icp(
         rs_raw_xyz, lidar_xyz, ICP_MAX_CORR_DIST_M,
@@ -99,7 +87,8 @@ def main(db_path: str) -> None:
         base_translation=ROUGH_CAM_OFFSET_IN_LIDAR_FRAME,
     )
     rs_xyz = apply_matrix(rs_raw_xyz, rs_icp_T)
-    print(f"realsense (raw, ICP-aligned): {_fmt_score(rs_xyz, lidar_xyz)}")
+    scores["realsense (raw)"] = compute_score(rs_xyz, lidar_xyz, FSCORE_TIGHT_M, FSCORE_LOOSE_M, VOXEL_SIZE_M)
+    print(format_score("realsense (raw, ICP-aligned)", scores["realsense (raw)"], FSCORE_TIGHT_M, FSCORE_LOOSE_M, VOXEL_SIZE_M))
 
     stereo_icp_T = best_yaw_icp(
         stereo_raw_xyz, lidar_xyz, ICP_MAX_CORR_DIST_M,
@@ -107,7 +96,8 @@ def main(db_path: str) -> None:
         base_translation=ROUGH_CAM_OFFSET_IN_LIDAR_FRAME,
     )
     stereo_xyz = apply_matrix(stereo_raw_xyz, stereo_icp_T)
-    print(f"stereo (ours, ICP-aligned): {_fmt_score(stereo_xyz, lidar_xyz)}")
+    scores["stereo (ours)"] = compute_score(stereo_xyz, lidar_xyz, FSCORE_TIGHT_M, FSCORE_LOOSE_M, VOXEL_SIZE_M)
+    print(format_score("stereo (ours, ICP-aligned)", scores["stereo (ours)"], FSCORE_TIGHT_M, FSCORE_LOOSE_M, VOXEL_SIZE_M))
 
     origin = np.zeros(3, dtype=np.float32)
     print(
@@ -116,6 +106,9 @@ def main(db_path: str) -> None:
         f"realsense={range_binned_density(rs_xyz, origin, RANGE_BINS_M)} "
         f"stereo={range_binned_density(stereo_xyz, origin, RANGE_BINS_M)}"
     )
+
+    print()
+    print(format_verdict_report(len(lidar_xyz), scores))
 
 
 if __name__ == "__main__":
