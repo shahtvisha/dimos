@@ -131,6 +131,19 @@ def main(db_path: str) -> None:
         )
         print(format_score("realsense (raw, best-of-frames)", scores["realsense (raw)"], FSCORE_TIGHT_M, FSCORE_LOOSE_M, VOXEL_SIZE_M))
 
+        # Two different measurements, answering two different questions:
+        #  - "best single frame" isolates per-frame depth+pose quality, same method
+        #    as realsense above, so the two are actually comparable apples-to-apples.
+        #  - "accumulated" reveals VIO drift over the recording (if per-frame poses
+        #    drift relative to each other during rotation, concatenating smears the
+        #    map — low accuracy despite OK completeness is exactly that signature).
+        # A big gap between the two IS the finding: it isolates "SLAM drift over time"
+        # as the weak point, separate from "is a single frame's depth/pose any good".
+        _, scores["stereo (best single frame)"] = _best_of_independent_frames(
+            store, "stereo", lidar_xyz, np.eye(3), REALSENSE_SAMPLE_FRAMES,
+        )
+        print(format_score("stereo (ours, best single frame)", scores["stereo (best single frame)"], FSCORE_TIGHT_M, FSCORE_LOOSE_M, VOXEL_SIZE_M))
+
         stereo_raw_xyz = _accumulate_xyz(store, "stereo", VOXEL_SIZE_M)
         stereo_icp_T = best_yaw_icp(
             stereo_raw_xyz, lidar_xyz, ICP_MAX_CORR_DIST_M,
@@ -138,8 +151,8 @@ def main(db_path: str) -> None:
             base_translation=ROUGH_CAM_OFFSET_IN_LIDAR_FRAME,
         )
         stereo_xyz = apply_matrix(stereo_raw_xyz, stereo_icp_T)
-        scores["stereo (ours)"] = compute_score(stereo_xyz, lidar_xyz, FSCORE_TIGHT_M, FSCORE_LOOSE_M, VOXEL_SIZE_M)
-        print(format_score("stereo (ours, accumulated)", scores["stereo (ours)"], FSCORE_TIGHT_M, FSCORE_LOOSE_M, VOXEL_SIZE_M))
+        scores["stereo (accumulated over rotation)"] = compute_score(stereo_xyz, lidar_xyz, FSCORE_TIGHT_M, FSCORE_LOOSE_M, VOXEL_SIZE_M)
+        print(format_score("stereo (ours, accumulated)", scores["stereo (accumulated over rotation)"], FSCORE_TIGHT_M, FSCORE_LOOSE_M, VOXEL_SIZE_M))
 
     origin = np.zeros(3, dtype=np.float32)
     print(
