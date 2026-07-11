@@ -19,7 +19,7 @@ import sys
 import numpy as np
 
 from dimos.mapping.utils.cli.lidar_stereo_bench import (
-    ROUGH_CAM_OFFSET_IN_LIDAR_FRAME,
+    MEASURED_CAM_OFFSET_IN_LIDAR_FRAME,
     R_OPT_TO_LINK,
     apply_matrix,
     best_yaw_icp,
@@ -35,7 +35,7 @@ from dimos.memory2.store.sqlite import SqliteStore
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 
 MIN_LIDAR_RANGE_M = 0.5
-ICP_MAX_CORR_DIST_M = 0.25
+ICP_MAX_CORR_DIST_M = 0.15  # tightened now the translation prior is tape-measured, not guessed
 YAW_STEPS = 12
 FSCORE_TIGHT_M = 0.05
 FSCORE_LOOSE_M = 0.20
@@ -106,7 +106,7 @@ def _best_of_independent_frames(
         icp_T = best_yaw_icp(
             raw_xyz, lidar_xyz, ICP_MAX_CORR_DIST_M,
             base_rotation=base_rotation, yaw_steps=YAW_STEPS,
-            base_translation=ROUGH_CAM_OFFSET_IN_LIDAR_FRAME,
+            base_translation=MEASURED_CAM_OFFSET_IN_LIDAR_FRAME,
         )
         xyz = apply_matrix(raw_xyz, icp_T)
         score = compute_score(xyz, lidar_xyz, FSCORE_TIGHT_M, FSCORE_LOOSE_M, VOXEL_SIZE_M)
@@ -148,7 +148,7 @@ def main(db_path: str) -> None:
         stereo_icp_T = best_yaw_icp(
             stereo_raw_xyz, lidar_xyz, ICP_MAX_CORR_DIST_M,
             base_rotation=np.eye(3), yaw_steps=YAW_STEPS,
-            base_translation=ROUGH_CAM_OFFSET_IN_LIDAR_FRAME,
+            base_translation=MEASURED_CAM_OFFSET_IN_LIDAR_FRAME,
         )
         stereo_xyz = apply_matrix(stereo_raw_xyz, stereo_icp_T)
         scores["stereo (accumulated over rotation)"] = compute_score(stereo_xyz, lidar_xyz, FSCORE_TIGHT_M, FSCORE_LOOSE_M, VOXEL_SIZE_M)

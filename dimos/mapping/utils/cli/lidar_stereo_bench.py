@@ -60,10 +60,11 @@ from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
 
-# Rough verbal estimate (not measured): D435i sits higher than the Mid-360 and at
-# most 3cm further back, in the lidar's own body frame (X=forward, Y=left, Z=up).
-# Height magnitude is still a guess — refine with a tape measure if ICP still struggles.
-ROUGH_CAM_OFFSET_IN_LIDAR_FRAME = np.array([-0.03, 0.0, 0.10])
+# Tape-measured (2026-07-11): lidar 37cm off the ground; D435i body spans roughly
+# 77-84cm (using the 80.5cm midpoint), 1cm behind the lidar, pointing forward (no
+# tilt reported) — in the lidar's own body frame (X=forward, Y=left, Z=up). The
+# +-3.5cm spread in the camera height measurement is the main remaining uncertainty.
+MEASURED_CAM_OFFSET_IN_LIDAR_FRAME = np.array([-0.01, 0.0, 0.435])
 
 
 # ── Metrics ─────────────────────────────────────────────────────────────────
@@ -279,7 +280,7 @@ class BenchConfig(ModuleConfig):
     fscore_threshold_m: float = 0.05
     fscore_threshold_loose_m: float = 0.20
     voxel_size_m: float = 0.05
-    icp_max_corr_dist_m: float = 0.25  # tighter now that a rough translation prior seeds the search
+    icp_max_corr_dist_m: float = 0.15  # tightened now the translation prior is tape-measured, not guessed
     min_lidar_range_m: float = 0.5  # drop near-field self-return noise (matches FAST-LIO2's `blind`)
     forward_cone_half_angle_deg: float = 70.0  # crop lidar's 360-degree sphere to ~camera FOV
     yaw_steps: int = 12  # heading hypotheses swept per ICP call (30 degree steps)
@@ -382,7 +383,7 @@ class LidarStereoBenchmark(Module):
             rs_icp_T = best_yaw_icp(
                 rs_raw_xyz, lidar_xyz, cfg.icp_max_corr_dist_m,
                 base_rotation=R_OPT_TO_LINK.astype(np.float64), yaw_steps=cfg.yaw_steps,
-                base_translation=ROUGH_CAM_OFFSET_IN_LIDAR_FRAME,
+                base_translation=MEASURED_CAM_OFFSET_IN_LIDAR_FRAME,
             )
             rs_xyz = apply_matrix(rs_raw_xyz, rs_icp_T)
             rs_score = self._score(lidar_xyz, rs_xyz)
@@ -403,7 +404,7 @@ class LidarStereoBenchmark(Module):
                     stereo_icp_T = best_yaw_icp(
                         stereo_raw_xyz, lidar_xyz, cfg.icp_max_corr_dist_m,
                         base_rotation=np.eye(3), yaw_steps=cfg.yaw_steps,
-                        base_translation=ROUGH_CAM_OFFSET_IN_LIDAR_FRAME,
+                        base_translation=MEASURED_CAM_OFFSET_IN_LIDAR_FRAME,
                     )
                     stereo_xyz = apply_matrix(stereo_raw_xyz, stereo_icp_T)
                     stereo_score = self._score(lidar_xyz, stereo_xyz)
