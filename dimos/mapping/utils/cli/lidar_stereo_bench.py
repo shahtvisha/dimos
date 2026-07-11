@@ -230,6 +230,17 @@ def apply_matrix(points: np.ndarray, matrix: np.ndarray) -> np.ndarray:
     return (matrix @ homogeneous.T).T[:, :3].astype(np.float32)  # type: ignore[no-any-return]
 
 
+def voxel_downsample_xyz(points: np.ndarray, voxel_size: float) -> np.ndarray:
+    """Keep one representative point per voxel — for de-duplicating a cloud built by
+    concatenating many already-registered frames (e.g. accumulating StereoPointCloud
+    over a recording), where the same real surface gets hit repeatedly."""
+    if len(points) == 0:
+        return points
+    keys = np.floor(points / voxel_size).astype(np.int64)
+    _, idx = np.unique(keys, axis=0, return_index=True)
+    return points[idx]
+
+
 def drop_near_field(points: np.ndarray, min_range: float) -> np.ndarray:
     """Drop points within ``min_range`` of the sensor origin — self-return/housing noise.
 
