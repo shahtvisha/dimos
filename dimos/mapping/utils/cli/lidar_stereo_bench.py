@@ -274,31 +274,43 @@ class LidarStereoBenchmark(Module):
         lines = [f"lidar (ref): n={len(lidar_xyz)}"]
         self._publish_vis(self.vis_lidar, lidar_xyz)
 
-        # RealSense raw cloud is in optical convention (Z=depth, Y=down) — a known,
-        # fixed rotation away from the lidar's body frame (Z=up) — plus an unknown heading.
-        rs_icp_T = best_yaw_icp(
-            rs_raw_xyz, lidar_xyz, cfg.icp_max_corr_dist_m,
-            base_rotation=R_OPT_TO_LINK.astype(np.float64), yaw_steps=cfg.yaw_steps,
-            base_translation=ROUGH_CAM_OFFSET_IN_LIDAR_FRAME,
-        )
-        rs_xyz = apply_matrix(rs_raw_xyz, rs_icp_T)
-        rs_score = self._score(lidar_xyz, rs_xyz)
-        lines.append(self._fmt("realsense (raw, ICP-aligned)", rs_score))
-        self._publish_vis(self.vis_realsense_aligned, rs_xyz)
+        # Each candidate is isolated in its own try/except — an ICP failure on one
+        # (e.g. realsense) must not silently swallow the other (e.g. stereo) and
+        # block its publish/log. Previously they shared one un-guarded code path,
+        # so a raised exception partway through realsense's alignment meant stereo
+        # (and its vis_stereo_aligned publish) never ran at all, every cycle.
+        rs_xyz = np.empty((0, 3), dtype=np.float32)
+        try:
+            # RealSense raw cloud is in optical convention (Z=depth, Y=down) — a known,
+            # fixed rotation away from the lidar's body frame (Z=up) — plus an unknown heading.
+            rs_icp_T = best_yaw_icp(
+                rs_raw_xyz, lidar_xyz, cfg.icp_max_corr_dist_m,
+                base_rotation=R_OPT_TO_LINK.astype(np.float64), yaw_steps=cfg.yaw_steps,
+                base_translation=ROUGH_CAM_OFFSET_IN_LIDAR_FRAME,
+            )
+            rs_xyz = apply_matrix(rs_raw_xyz, rs_icp_T)
+            rs_score = self._score(lidar_xyz, rs_xyz)
+            lines.append(self._fmt("realsense (raw, ICP-aligned)", rs_score))
+            self._publish_vis(self.vis_realsense_aligned, rs_xyz)
+        except Exception:
+            logger.exception("LidarStereoBenchmark: realsense alignment/scoring failed")
 
         if stereo_msg is not None:
             stereo_raw_xyz = stereo_msg.points_f32()
             if len(stereo_raw_xyz) >= cfg.min_points:
-                # Already body-frame-oriented (Z=up) internally — only heading is unknown.
-                stereo_icp_T = best_yaw_icp(
-                    stereo_raw_xyz, lidar_xyz, cfg.icp_max_corr_dist_m,
-                    base_rotation=np.eye(3), yaw_steps=cfg.yaw_steps,
-                    base_translation=ROUGH_CAM_OFFSET_IN_LIDAR_FRAME,
-                )
-                stereo_xyz = apply_matrix(stereo_raw_xyz, stereo_icp_T)
-                stereo_score = self._score(lidar_xyz, stereo_xyz)
-                lines.append(self._fmt("stereo (ours, ICP-aligned)", stereo_score))
-                self._publish_vis(self.vis_stereo_aligned, stereo_xyz)
+                try:
+                    # Already body-frame-oriented (Z=up) internally — only heading is unknown.
+                    stereo_icp_T = best_yaw_icp(
+                        stereo_raw_xyz, lidar_xyz, cfg.icp_max_corr_dist_m,
+                        base_rotation=np.eye(3), yaw_steps=cfg.yaw_steps,
+                        base_translation=ROUGH_CAM_OFFSET_IN_LIDAR_FRAME,
+                    )
+                    stereo_xyz = apply_matrix(stereo_raw_xyz, stereo_icp_T)
+                    stereo_score = self._score(lidar_xyz, stereo_xyz)
+                    lines.append(self._fmt("stereo (ours, ICP-aligned)", stereo_score))
+                    self._publish_vis(self.vis_stereo_aligned, stereo_xyz)
+                except Exception:
+                    logger.exception("LidarStereoBenchmark: stereo alignment/scoring failed")
 
         origin = np.zeros(3, dtype=np.float32)
         lines.append(f"range-binned density {cfg.range_bins_m}: lidar={range_binned_density(lidar_xyz, origin, cfg.range_bins_m)} "
