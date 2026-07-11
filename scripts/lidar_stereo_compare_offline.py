@@ -38,14 +38,30 @@ FSCORE_LOOSE_M = 0.20
 VOXEL_SIZE_M = 0.05
 RANGE_BINS_M = [0.0, 0.5, 1.0, 2.0, 4.0, 8.0, 100.0]
 
+# StereoPointCloud's position comes from its own VIO (ICP-based), which can drift
+# over a stationary robot the longer the recording runs — even without real motion
+# (the same drift the stereo-odometry work has been fighting elsewhere). Grabbing
+# the *last* frame of a long recording picks up whatever drift accumulated by then.
+# ~6s in is late enough for floor calibration to finish (StereoPointCloud needs ~4s)
+# but early enough to keep drift small.
+FRAME_OFFSET_S = 6.0
 
-def _last_xyz(store: SqliteStore, name: str) -> np.ndarray:
-    last = None
+
+def _frame_near(store: SqliteStore, name: str, offset_s: float) -> np.ndarray:
+    """Pick the observation whose time is closest to (stream start + offset_s)."""
+    first_ts: float | None = None
+    best_obs = None
+    best_dt = float("inf")
     for obs in store.stream(name, PointCloud2):
-        last = obs
-    if last is None:
+        if first_ts is None:
+            first_ts = obs.ts
+        dt = abs((obs.ts - first_ts) - offset_s)
+        if dt < best_dt:
+            best_dt = dt
+            best_obs = obs
+    if best_obs is None:
         raise SystemExit(f"No frames recorded for stream {name!r} — check `store.summary()` above")
-    return last.data.points_f32()
+    return best_obs.data.points_f32()
 
 
 def _fmt_score(pred: np.ndarray, gt: np.ndarray) -> str:
@@ -64,9 +80,9 @@ def _fmt_score(pred: np.ndarray, gt: np.ndarray) -> str:
 def main(db_path: str) -> None:
     with SqliteStore(path=db_path) as store:
         print(store.summary())
-        lidar_xyz = drop_near_field(_last_xyz(store, "lidar"), MIN_LIDAR_RANGE_M)
-        rs_raw_xyz = _last_xyz(store, "realsense_raw")
-        stereo_raw_xyz = _last_xyz(store, "stereo")
+        lidar_xyz = drop_near_field(_frame_near(store, "lidar", FRAME_OFFSET_S), MIN_LIDAR_RANGE_M)
+        rs_raw_xyz = _frame_near(store, "realsense_raw", FRAME_OFFSET_S)
+        stereo_raw_xyz = _frame_near(store, "stereo", FRAME_OFFSET_S)
 
     print(f"lidar (ref): n={len(lidar_xyz)}")
 
