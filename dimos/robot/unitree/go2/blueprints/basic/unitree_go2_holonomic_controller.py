@@ -45,6 +45,8 @@ Run (one of two processes; the benchmark is the other)::
 
 from __future__ import annotations
 
+import os
+
 from dimos.control.components import HardwareComponent, HardwareType, make_twist_base_joints
 from dimos.control.coordinator import ControlCoordinator, TaskConfig
 from dimos.core.coordination.blueprints import autoconnect
@@ -100,7 +102,12 @@ unitree_go2_holonomic_controller = (
                     priority=10,
                     params={
                         "speed": 0.5,
-                        "lookahead": 0.25,
+                        # Sweep knobs — override via env for A/B testing without
+                        # editing code (defaults match the prior hardcoded values).
+                        "lookahead": float(os.environ.get("HOLO_LOOKAHEAD", 0.25)),
+                        "regulate_horizon": float(
+                            os.environ.get("HOLO_REGULATE_HORIZON", 0.6)
+                        ),
                         "goal_tolerance": 0.20,
                         "orientation_tolerance": 0.25,
                     },

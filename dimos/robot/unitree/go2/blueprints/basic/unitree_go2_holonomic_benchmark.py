@@ -35,6 +35,7 @@ odom automatically::
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from dimos.control.benchmarking.benchmark import Benchmarker
@@ -63,7 +64,14 @@ unitree_go2_holonomic_benchmark = (
         # "all" = the tangent-heading geometry (square, rounded_square, circle,
         # ...) PLUS the decoupled-yaw full-pose cases. Use K (skip) at the gate
         # to trim a session; battery="fullpose" runs just the decoupled cases.
-        Benchmarker.blueprint(robot="go2", battery="all", gate_source="stream"),
+        # HOLO_OUT_DIR tags sweep runs into separate folders so they don't
+        # overwrite each other; unset ⟹ prior default (data/benchmark/go2).
+        Benchmarker.blueprint(
+            robot="go2",
+            battery="all",
+            gate_source="stream",
+            out_dir=os.environ.get("HOLO_OUT_DIR"),
+        ),
     )
     # Record the command the robot actually receives (/go2/cmd_vel, written by
     # the coordinator's base adapter) — NOT /cmd_vel, which only carries the
