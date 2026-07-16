@@ -66,11 +66,14 @@ unitree_go2_holonomic_benchmark = (
         # to trim a session; battery="fullpose" runs just the decoupled cases.
         # HOLO_OUT_DIR tags sweep runs into separate folders so they don't
         # overwrite each other; unset ⟹ prior default (data/benchmark/go2).
+        # HOLO_SPEEDS trims the per-path speed list for faster sweeps (e.g.
+        # "0.5,0.9"); unset ⟹ prior default (0.3,0.5,0.7,0.9,1.0).
         Benchmarker.blueprint(
             robot="go2",
             battery="all",
             gate_source="stream",
             out_dir=os.environ.get("HOLO_OUT_DIR"),
+            speeds=os.environ.get("HOLO_SPEEDS", "0.3,0.5,0.7,0.9,1.0"),
         ),
     )
     # Record the command the robot actually receives (/go2/cmd_vel, written by
