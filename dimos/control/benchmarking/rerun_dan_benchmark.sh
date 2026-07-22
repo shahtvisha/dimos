@@ -8,6 +8,9 @@ RAW_ROOT="$REPO_ROOT/data/benchmark/go2_dan_raw"
 FINAL_DIR="$REPO_ROOT/data/benchmark/go2_dan"
 
 for SPEED in 0.3 0.5 0.7 0.9 1.0; do
+  # Match Python's f"{speed:.2f}" formatting used in the recorded filenames.
+  SPEED_FMT=$(printf "%.2f" "$SPEED")
+
   echo "=================================================="
   echo " Speed $SPEED m/s"
   echo "=================================================="
@@ -16,7 +19,7 @@ for SPEED in 0.3 0.5 0.7 0.9 1.0; do
   pkill -f "bin/dimos" || true
   sleep 1
 
-  SPEED_DIR="$RAW_ROOT/v$SPEED"
+  SPEED_DIR="$RAW_ROOT/v$SPEED_FMT"
   mkdir -p "$SPEED_DIR"
 
   echo ">>> About to launch at DAN_SPEED_M_S=$SPEED"
@@ -28,13 +31,13 @@ for SPEED in 0.3 0.5 0.7 0.9 1.0; do
   DAN_SPEED_M_S="$SPEED" DAN_OUT_DIR="$SPEED_DIR" dimos run unitree-go2-dan-holonomic-benchmark
 
   # Sanity check: every file written for this launch must carry the intended speed.
-  BAD=$(ls "$SPEED_DIR" 2>/dev/null | grep -v "_v${SPEED}_" || true)
+  BAD=$(ls "$SPEED_DIR" 2>/dev/null | grep -v "_v${SPEED_FMT}_" || true)
   if [ -n "$BAD" ]; then
     echo "!!! Files in $SPEED_DIR do not match intended speed $SPEED -- env var did not take effect:"
     echo "$BAD"
     exit 1
   fi
-  echo ">>> OK: $(ls "$SPEED_DIR" | wc -l) files recorded at v$SPEED, all correctly labeled."
+  echo ">>> OK: $(ls "$SPEED_DIR" | wc -l) files recorded at v$SPEED_FMT, all correctly labeled."
 done
 
 echo "=================================================="
