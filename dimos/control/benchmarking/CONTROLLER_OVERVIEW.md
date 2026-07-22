@@ -1,62 +1,135 @@
-# Go2 Trajectory Controllers — How They Work
+# Holonomic Trajectory Controller Comparison: Mustafa vs Dan
 
-Three controllers are being benchmarked against the same test: same paths, same speeds,
-same scoring. This is what each one actually does, in plain terms.
+Both controllers take a full pose path (position and independently commanded yaw) and drive
+the Go2 to follow it, holonomically. Both are being benchmarked on the same path battery at
+the same speeds. This doc walks through how each one actually works.
 
-## The shared test
+## Data flow
 
-Every controller gets fed the same thing: a path to follow and a target speed. A separate
-recorder watches the robot's actual position the whole time and scores how well it tracked
-the path — it doesn't know or care which controller is driving.
+**Mustafa's controller**
 
-## P-controller
+```
+odom (x, y, yaw)
+      |
+      v
+project onto path, searching only near the last known progress point
+(windowed search, not the whole path)
+      |
+      v
+progress s_robot -----------------> remaining = path_length - s_robot
+      |                                       |
+      v                                       v
+lookahead point at s_robot + L        arrival gate: remaining < tolerance?
+      |
+      v
+feedforward velocity (from a plant model fit to this robot)
+   + feedback trim (small correction toward the lookahead point)
+      |
+      v
+twist (vx, vy, wz)
+```
 
-The simplest of the three. It picks a point a fixed distance ahead on the path, and steers
-toward it: if it's pointing the wrong way, it turns in place first; otherwise it drives
-forward while correcting its heading proportionally to how far off it is.
+**Dan's controller**
 
-- **Can only face the direction it's driving.** No sideways movement, no holding a different
-  heading than its travel direction.
-- Works fine on normal paths (straight lines, corners, loops). Cannot meaningfully attempt
-  paths that require facing a different way than it's traveling (e.g. driving sideways) —
-  it's not built to do that at all.
+```
+odom (x, y, yaw)
+      |
+      v
+project onto path, searching the entire path fresh every tick
+      |
+      v
+nearest point + arc length s                straight line distance
+      |                                      to the final waypoint (x, y)
+      v                                             |
+lookahead point at s + L                             v
+      |                                       arrival gate: distance < tolerance?
+      v
+proportional control
+(gains on position error, yaw error, velocity error, yaw rate error)
+      |
+      v
+twist (vx, vy, wz)
+```
 
-## Mustafa's controller
+The steering side of both looks similar in shape: project onto the path, take a lookahead
+point, compute a velocity command toward it. The arrival side is where they genuinely differ,
+and that difference has real consequences.
 
-Tracks both **where** it is and **which way it's facing** independently — it can drive
-sideways while facing a completely different direction, like walking through a doorway
-while looking down a hallway.
+## Start
 
-- Its speed and steering response are **calibrated to this specific robot** — the numbers
-  come from measuring how the real Go2 actually responds to commands, not generic settings.
-- It measures **how far along the route it has actually driven**, not just how close it
-  looks to the finish line. It only calls a run "done" after settling in place at the
-  target for a full second — if it drifts, it corrects and re-checks.
+Dan's controller checks its heading against the path's initial direction before it starts
+driving. If the error is above `orientation_tolerance`, it rotates in place first, and only
+switches to `path_following` once roughly aligned.
 
-## Dan's controller
+Mustafa's controller has no separate rotate-first phase. Since it tracks position and yaw
+independently and simultaneously, it starts driving immediately and corrects heading as part
+of the same continuous feedback loop, no discrete alignment step needed.
 
-Also holonomic — can drive sideways and hold an independent heading, same as Mustafa's.
+## Progress
 
-- It continuously finds the nearest point on the path ahead and steers there.
-- **Known limitation:** it decides "am I done?" using straight-line distance to the finish
-  point only — it doesn't track how much of the route it's actually driven. This works fine
-  for a route that ends somewhere different from where it started. But for a route that
-  loops back to its own starting point (a circle or a square), the start and the finish are
-  the same spot — so it can conclude "I'm done" before actually driving anywhere. Confirmed
-  on real hardware, at every speed tested; the other 6 (non-looping) paths are unaffected.
-- Also: its target speed is set once when it starts, not adjustable mid-run — so testing it
-  at 5 different speeds means restarting it 5 times, not one continuous session like the
-  other two.
+This is the core difference between the two.
 
-## At a glance
+Mustafa's projection is stateful. Each tick, it only searches for the nearest point on the
+path within a small window around where it was last found (about half a meter behind to a
+meter ahead of the last known position on the path). It cannot suddenly jump to a distant part
+of the path. This is a deliberate design choice: for a path that loops back to its own start
+(a circle or a square), a naive global search would find the goal and the start equally close
+together right from the first tick, since they are literally the same point. The windowed
+search rules that out.
 
-| | P-controller | Mustafa's | Dan's |
-|---|---|---|---|
-| Can face a different way than it's driving? | No | Yes | Yes |
-| Calibrated to this specific robot? | No | Yes | Not confirmed |
-| Can reliably finish a looping path? | Yes | Yes | **No — confirmed bug** |
-| Speed adjustable mid-session? | Yes | Yes | No |
+Dan's projection is stateless. Every tick, it searches the entire path fresh, with no memory
+of where it was last matched. For an open path this is fine, since there is only one place on
+the path close to the robot at any given time. For a closed loop, the start and the goal are
+the same coordinate, so there is nothing forcing the match to prefer "still near the start"
+over "already at the goal."
 
-## Want more detail?
+## Arrival
 
-Full technical write-up with exact code references: `CONTROLLER_COMPARISON.md` (same folder).
+Mustafa's arrival is gated on how much of the path is left to drive, not on spatial distance.
+It tracks `remaining`, the arc length from the robot's current progress to the end of the
+path. Only once `remaining` drops below tolerance does it move from `tracking` to `settling`.
+From there it still needs position and yaw error both within tolerance, and then it has to
+hold still at that pose for a full second before it finally declares `arrived`. If it drifts
+out of tolerance during that hold, it goes back to `settling` and tries again.
+
+Dan's arrival is a single check: straight line distance from the current position to the
+path's last waypoint, evaluated fresh every tick. No arc length, no progress requirement, no
+settle and hold.
+
+For an open path, this works out the same in practice, since the robot can only get close to
+the final waypoint by actually having driven there. For a closed loop, the final waypoint is
+the same coordinate as the start. So `distance to goal` is already near zero the instant the
+path is armed, before the robot moves at all. Confirmed on hardware: Dan's controller
+declares `arrived` on `circle`, `square`, and their full pose variants within a tick of
+starting, at every speed tested. The other six paths in the battery, which do not loop, are
+unaffected.
+
+## Control law
+
+Mustafa's gains are derived from a measured plant fit for this specific robot: a first order
+time constant and gain per axis (vx, vy, wz), loaded from a vendored calibration artifact. On
+top of that sits a feedforward compensator that inverts the measured gain, so a commanded
+velocity produces the intended achieved velocity, with feedback doing only small trim
+corrections. It also looks ahead along the path for upcoming curvature or yaw rate demand and
+slows down before a tight corner instead of at it.
+
+Dan's gains are four proportional constants, one each for position, yaw, velocity, and yaw
+rate. There is no evidence in the code of an equivalent plant characterization or feedforward
+step. This does not mean it tracks worse, that is an open, measured question, just that the
+two controllers get to their commanded velocity through different means.
+
+## Speed
+
+Mustafa's speed can change live, mid session, since it is read from a broadcast the
+coordinator forwards to the task. Dan's speed is fixed at launch (or picked from one of three
+named profiles), with no live input. Sweeping Dan's controller across multiple speeds means
+relaunching it once per speed rather than one continuous run.
+
+## Where the code lives
+
+- Mustafa: `dimos/control/tasks/holonomic_pose_follower_task/holonomic_pose_follower_task.py`,
+  progress tracking in `progress_reference.py` in the same folder.
+- Dan: `dimos/navigation/dannav/holonomic_tc/module.py`, projection and arrival check in
+  `dimos/navigation/dannav/geometry/path_distancer.py`.
+
+Full technical writeup with exact references: `CONTROLLER_COMPARISON.md`, same folder.
