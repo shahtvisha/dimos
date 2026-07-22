@@ -125,6 +125,18 @@ coordinator forwards to the task. Dan's speed is fixed at launch (or picked from
 named profiles), with no live input. Sweeping Dan's controller across multiple speeds means
 relaunching it once per speed rather than one continuous run.
 
+## Summary table
+
+| | Mustafa's | Dan's |
+|---|---|---|
+| Start | Drives immediately, corrects heading while moving | Rotates in place first if not roughly aligned |
+| Progress | Windowed search near last known position | Fresh global search every tick |
+| Arrival | Remaining path distance, then settle and hold for 1s | Straight line distance to final point, checked once |
+| Control law | Plant-fit gains plus feedforward, feedback is trim only | Fixed proportional gains, no known feedforward |
+| Speed | Changeable live, mid session | Fixed at launch or one of 3 named profiles |
+| Preemption | Native coordinator hook, aborts cleanly | No hook, needs an external mixer module |
+| Closed loops | Handled correctly | Confirmed bug: arrives instantly, never drives |
+
 ## Where the code lives
 
 - Mustafa: `dimos/control/tasks/holonomic_pose_follower_task/holonomic_pose_follower_task.py`,
