@@ -27,8 +27,8 @@ followers in one coordinator — they would fight over the base joints.
 
 Interface (pure LCM pub/sub, identical to the RPP controller):
 
-    IN   path   (nav_msgs/Path)        -> coordinator.path  -> holonomic_follower.set_path
-    IN   speed  (std_msgs/Float32, m/s)-> coordinator.speed -> holonomic_follower.set_speed
+    IN   path   (nav_msgs/Path)        -> coordinator.path  -> holonomic_follower.on_path
+    IN   speed  (std_msgs/Float32, m/s)-> coordinator.speed -> holonomic_follower.on_speed
     OUT  odom   (geometry_msgs/PoseStamped, /go2/odom)  -- the Go2 leg odom
     OUT  cmd_vel(geometry_msgs/Twist,        /cmd_vel)  -- aggregated command echo
 
@@ -38,17 +38,20 @@ per-run gate on ``/benchmark/gate``. The follower self-calibrates from the
 vendored pose-domain artifact on the first path (per-axis P gains from the
 plant fit, feedforward gain inversion, measured envelope caps).
 
-Run (one of two processes; the benchmark is the other)::
+Run the controller standalone to drive paths from any source on ``/path``::
 
     dimos run unitree-go2-holonomic-controller
+
+To pace runs with the built-in battery instead, run
+``unitree-go2-holonomic-benchmark``, which composes this controller with the
+Benchmarker in one process.
 """
 
 from __future__ import annotations
 
-import os
-
 from dimos.control.components import HardwareComponent, HardwareType, make_twist_base_joints
-from dimos.control.coordinator import ControlCoordinator, TaskConfig
+from dimos.control.coordinator import TaskConfig
+from dimos.control.path_following_coordinator import PathFollowingCoordinator
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.transport import LCMTransport
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
@@ -72,7 +75,7 @@ unitree_go2_holonomic_controller = (
         # under the default the commanded and achieved speeds disagree — the
         # robot runs hot and glides past the goal.
         GO2Connection.blueprint(velocity_api=True),
-        ControlCoordinator.blueprint(
+        PathFollowingCoordinator.blueprint(
             publish_joint_state=True,
             hardware=[
                 HardwareComponent(
@@ -92,7 +95,7 @@ unitree_go2_holonomic_controller = (
                     priority=20,
                     params={"zero_on_timeout": False},
                 ),
-                # Sole set_path/set_speed responder: the progress-indexed
+                # Sole path/speed consumer: the progress-indexed
                 # holonomic full-pose tracker. Self-calibrates from the
                 # vendored pose-domain artifact on the first path.
                 TaskConfig(
@@ -102,12 +105,7 @@ unitree_go2_holonomic_controller = (
                     priority=10,
                     params={
                         "speed": 0.5,
-                        # Sweep knobs — override via env for A/B testing without
-                        # editing code (defaults match the prior hardcoded values).
-                        "lookahead": float(os.environ.get("HOLO_LOOKAHEAD", 0.25)),
-                        "regulate_horizon": float(
-                            os.environ.get("HOLO_REGULATE_HORIZON", 0.6)
-                        ),
+                        "lookahead": 0.25,
                         "goal_tolerance": 0.20,
                         "orientation_tolerance": 0.25,
                     },
@@ -138,7 +136,7 @@ unitree_go2_holonomic_controller = (
             ("path", Path): LCMTransport("/path", Path),
             ("speed", Float32): LCMTransport("/speed", Float32),
             # Operator gate (teleop -> benchmark) to pace runs.
-            ("gate", Int8): LCMTransport("/benchmark/gate", Int8),
+            ("operator_command", Int8): LCMTransport("/benchmark/gate", Int8),
             # Aggregated joint state for observability (positions = [x,y,yaw]).
             ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
             ("coordinator_joint_state", JointState): LCMTransport(

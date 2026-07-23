@@ -29,13 +29,12 @@ ENTER to start each run (K=skip, Backspace=quit). Completion is detected from
 odom automatically::
 
     dimos run unitree-go2-holonomic-benchmark
-    # afterwards, score offline:
-    python -m dimos.control.benchmarking.score data/benchmark/go2
+    # afterwards, score offline (the benchmark logs the recordings dir on start):
+    python -m dimos.control.benchmarking.score <recordings-dir>
 """
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from dimos.control.benchmarking.benchmark import Benchmarker
@@ -48,7 +47,7 @@ from dimos.robot.unitree.go2.blueprints.basic.unitree_go2_holonomic_controller i
 )
 
 # The Benchmarker's ``odom`` In must read the same topic the controller emits
-# leg odom on (/go2/odom). path/speed/cmd_vel/gate already share names+topics
+# leg odom on (/go2/odom). path/speed/cmd_vel/operator_command already share names+topics
 # with the controller blueprint, so they wire up by the controller's transports.
 _BENCHMARK_TRANSPORTS: dict[tuple[str, type], TransportSpec | Transport[Any]] = {
     ("odom", PoseStamped): LCMTransport("/go2/odom", PoseStamped),
@@ -64,14 +63,7 @@ unitree_go2_holonomic_benchmark = (
         # "all" = the tangent-heading geometry (square, rounded_square, circle,
         # ...) PLUS the decoupled-yaw full-pose cases. Use K (skip) at the gate
         # to trim a session; battery="fullpose" runs just the decoupled cases.
-        # HOLO_OUT_DIR tags sweep runs into separate folders so they don't
-        # overwrite each other; unset ⟹ prior default (data/benchmark/go2).
-        Benchmarker.blueprint(
-            robot="go2",
-            battery="all",
-            gate_source="stream",
-            out_dir=os.environ.get("HOLO_OUT_DIR"),
-        ),
+        Benchmarker.blueprint(robot="go2", battery="all", gate_source="stream"),
     )
     # Record the command the robot actually receives (/go2/cmd_vel, written by
     # the coordinator's base adapter) — NOT /cmd_vel, which only carries the
