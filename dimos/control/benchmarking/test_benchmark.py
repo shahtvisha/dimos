@@ -123,6 +123,34 @@ def test_malformed_recording_is_skipped_not_fatal(tmp_path):
     assert len(opm.points) == 1
 
 
+@pytest.mark.parametrize(
+    "corruption", ["string_speed", "inf_speed", "empty_reference", "empty_ticks"]
+)
+def test_unscoreable_recording_is_skipped(tmp_path, corruption):
+    """A string speed breaks the sort; an infinite speed forges the max-safe
+    speed; an empty reference or empty tick trace scores as a perfect run. All
+    skipped at load."""
+    import json
+
+    good_ticks = [[i * 0.1, i * 0.1, 0.0, 0.0, 0.5, 0.0, 0.0] for i in range(20)]
+    _write_recording(tmp_path / "go2_good_v0.50_000.json", name="straight_line", ticks=good_ticks)
+    bad = tmp_path / "go2_bad_001.json"
+    _write_recording(bad, name="straight_line", ticks=good_ticks)
+    data = json.loads(bad.read_text())
+    if corruption == "string_speed":
+        data["speed"] = "fast"
+    elif corruption == "inf_speed":
+        data["speed"] = float("inf")
+    elif corruption == "empty_reference":
+        data["reference"] = []
+    else:
+        data["ticks"] = []
+    bad.write_text(json.dumps(data))
+
+    opm = score_dir(tmp_path, tolerances_cm=[10], plots=False)
+    assert len(opm.points) == 1
+
+
 def test_path_set_is_the_full_battery():
     names = set(path_set())
     assert names == {
@@ -279,7 +307,7 @@ def test_end_to_end_controller_benchmark_scoring(tmp_path):
 
     # Benchmark anchors the path to the robot's first odom (here the origin).
     ref = shift_path_to_start_at_pose(straight_line(length=2.0), _pose(plant.x, plant.y, plant.yaw))
-    task.set_path(ref, _pose(plant.x, plant.y, plant.yaw))
+    task.start_path(ref, _pose(plant.x, plant.y, plant.yaw))
 
     recorder = OdomRecorder()
     monitor = _monitor(ref, dwell_s=0.3)
@@ -350,7 +378,7 @@ def test_end_to_end_fullpose_benchmark_scoring(tmp_path):
     ref = shift_path_to_start_at_pose(
         straight_rotate(length=3.0), _pose(plant.x, plant.y, plant.yaw)
     )
-    task.set_path(ref, _pose(plant.x, plant.y, plant.yaw))
+    task.start_path(ref, _pose(plant.x, plant.y, plant.yaw))
 
     recorder = OdomRecorder()
     monitor = _monitor(ref, dwell_s=0.3)

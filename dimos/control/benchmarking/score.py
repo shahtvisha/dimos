@@ -84,9 +84,17 @@ def load_recordings(recordings_dir: str | Path) -> list[RunRecording]:
             skipped += 1
             continue
         try:
-            recs.append(RunRecording(**data))
-        except TypeError:
+            rec = RunRecording(**data)
+            rec.speed = float(rec.speed)
+            # A non-finite speed can be picked as the max "safe" speed, and an
+            # empty reference scores as a perfect zero-CTE run — both would forge
+            # the recommendation. Reject rather than score.
+            if not math.isfinite(rec.speed) or not rec.reference or not rec.ticks:
+                raise ValueError("non-finite speed, empty reference, or empty tick trace")
+        except (TypeError, ValueError):
             skipped += 1
+            continue
+        recs.append(rec)
     if skipped:
         logger.info(f"skipped {skipped} non-recording JSON file(s) in {d}")
     return recs
