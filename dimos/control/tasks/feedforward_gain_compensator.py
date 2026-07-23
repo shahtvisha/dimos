@@ -31,6 +31,7 @@ feedback.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -59,6 +60,19 @@ class FeedforwardGainConfig:
     output_max_wz: float = 1.5
 
 
+def validate_plant_gains(K_vx: float, K_vy: float, K_wz: float) -> None:
+    """Raise if any gain is non-finite or non-positive. Callers divide by these
+    (u/K, envelope/K limits): ~0 blows up, and a negative gain reverses the
+    command (and inverts the envelope bounds). Validate before that division,
+    not only at construction."""
+    for axis, k in (("vx", K_vx), ("vy", K_vy), ("wz", K_wz)):
+        if not math.isfinite(k) or k <= 1e-6:
+            raise ValueError(
+                f"plant gain K_{axis}={k} is not usable (must be finite and "
+                f"positive); invalid calibration artifact."
+            )
+
+
 class FeedforwardGainCompensator:
     """Divide controller-output velocities by plant gains; clamp to limits.
 
@@ -69,15 +83,7 @@ class FeedforwardGainCompensator:
 
     def __init__(self, config: FeedforwardGainConfig | None = None) -> None:
         self.cfg = config or FeedforwardGainConfig()
-        # Fail at construction, not on the control tick: a near-zero plant gain
-        # would divide-by-zero (or explode) in compute(). A K of 0 means the
-        # calibration artifact says the axis does not move — an invalid artifact.
-        for axis, k in (("vx", self.cfg.K_vx), ("vy", self.cfg.K_vy), ("wz", self.cfg.K_wz)):
-            if abs(k) < 1e-6:
-                raise ValueError(
-                    f"FeedforwardGainConfig.K_{axis}={k} is ~0; a zero plant gain "
-                    f"is an invalid calibration artifact (axis does not move)."
-                )
+        validate_plant_gains(self.cfg.K_vx, self.cfg.K_vy, self.cfg.K_wz)
 
     def compute(
         self,

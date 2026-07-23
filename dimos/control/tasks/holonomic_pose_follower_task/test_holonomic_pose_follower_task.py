@@ -47,6 +47,7 @@ from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Path import Path
+from dimos.msgs.std_msgs.Float32 import Float32
 from dimos.utils.trigonometry import angle_diff
 
 _JOINTS = ["go2/vx", "go2/vy", "go2/wz"]
@@ -130,21 +131,33 @@ def test_claims_velocity_mode_on_three_joints():
 
 def test_set_path_arms_and_preemption_aborts():
     task = _task()
-    task.set_path(straight_rotate(), _pose())
+    task.start_path(straight_rotate(), _pose())
     assert task.is_active()
     task.on_preempted("teleop", frozenset(_JOINTS))
     assert task.get_state() == "aborted"
 
 
-def test_set_path_without_odom_is_dropped():
+def test_streamed_path_arms_on_the_first_tick_with_a_pose():
+    """The card handler carries no odom, so a streamed path is latched and armed
+    on the first tick that has a pose — never dropped for arriving early."""
     task = _task()
-    task.set_path(straight_rotate())
-    assert not task.is_active()
+    task.on_path(straight_rotate(), t_now=0.0)
+    assert not task.is_active()  # latched, not armed
+    task.compute(CoordinatorState(joints=JointStateSnapshot(), t_now=0.0, dt=_DT))
+    assert not task.is_active()  # still no pose available
+    task.compute(_state(0.0, 0.0, 0.0, t=_DT))
+    assert task.is_active()
+
+
+def test_streamed_speed_applies_before_the_path():
+    task = _task()
+    task.on_speed(Float32(data=0.8), t_now=0.0)
+    assert task._config.speed == pytest.approx(0.8)
 
 
 def test_set_speed_refused_while_active():
     task = _task()
-    task.set_path(straight_rotate(), _pose())
+    task.start_path(straight_rotate(), _pose())
     task.set_speed(0.9)
     assert task._config.speed == 0.5
 
@@ -157,7 +170,7 @@ def test_rejects_pure_rotation_path():
 
 def test_compute_without_pose_commands_zero():
     task = _task()
-    task.set_path(straight_rotate(), _pose())
+    task.start_path(straight_rotate(), _pose())
     state = CoordinatorState(joints=JointStateSnapshot(), t_now=0.0, dt=_DT)
     out = task.compute(state)
     assert out is not None
@@ -211,6 +224,20 @@ def test_crab_walks_square_holding_heading():
     assert max_yaw < 0.1, "robot turned instead of crab-walking the square"
     score = score_run(path, executed)
     assert score.cte_rms < 0.15
+
+
+def test_zero_gain_artifact_rejected_cleanly(tmp_path):
+    """A zero plant gain must raise ValueError at start_path (the envelope/K
+    divisions), not a raw ZeroDivisionError deep in the load."""
+    import json
+
+    art = json.loads(open(DEFAULT_ARTIFACT_PATH).read())
+    art["plant"]["vx"]["K"] = 0.0
+    bad = tmp_path / "zero_gain.json"
+    bad.write_text(json.dumps(art))
+    task = _task(artifact_path=str(bad))
+    with pytest.raises(ValueError, match="invalid calibration artifact"):
+        task.start_path(straight_rotate(length=2.0), _pose())
 
 
 def test_holds_fixed_tangent_offset_around_circle():
@@ -278,7 +305,7 @@ def test_replan_reprojects_without_reramp():
 
     # Replan: a new strafe path starting at the robot (as a planner would emit).
     path_b = Path(poses=[_pose(plant.x, plant.y + 2.0 * i / 40, 0.0) for i in range(41)])
-    task.set_path(path_b, _pose(plant.x, plant.y, plant.yaw))
+    task.start_path(path_b, _pose(plant.x, plant.y, plant.yaw))
     speeds = []
     for k in range(30, 40):
         out = task.compute(_state(plant.x, plant.y, plant.yaw, t=k * _DT))
@@ -291,7 +318,7 @@ def test_reference_waits_for_a_stalled_robot():
     """If the plant is frozen the commanded velocity must stay bounded (the
     reference waits at the projection; no clock runs away)."""
     task = _task()
-    task.set_path(straight_rotate(length=3.0), _pose())
+    task.start_path(straight_rotate(length=3.0), _pose())
     cmds = []
     for k in range(100):
         out = task.compute(_state(0.0, 0.0, 0.0, t=k * _DT))  # robot never moves
@@ -346,5 +373,5 @@ def test_configure_refused_while_active_and_accepts_unknown_kwargs():
     task = _task()
     assert task.configure(speed=0.7, k_angular=1.5)  # unknown kwarg ignored
     assert task._config.speed == 0.7
-    task.set_path(straight_rotate(), _pose())
+    task.start_path(straight_rotate(), _pose())
     assert not task.configure(speed=0.3)
