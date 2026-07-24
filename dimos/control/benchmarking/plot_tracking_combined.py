@@ -117,6 +117,45 @@ def _series(rec: RunRecording) -> dict[str, np.ndarray]:
     }
 
 
+_CHANNELS = [
+    ("x position", "x (m)", "actual_x", "cmd_x", "err_x", "error (m)"),
+    ("y position", "y (m)", "actual_y", "cmd_y", "err_y", "error (m)"),
+    ("heading", "heading (deg)", "actual_yaw", "cmd_yaw", "err_yaw", "error (deg)"),
+]
+
+
+def _draw_row(
+    left,
+    right,
+    row_title: str,
+    ylabel: str,
+    err_ylabel: str,
+    actual_key: str,
+    cmd_key: str,
+    err_key: str,
+    labeled_series: list[tuple[str, dict[str, np.ndarray]]],
+) -> None:
+    """Draw one channel's commanded-vs-actual + error pair into the given axes."""
+    ref_drawn = False
+    for i, (label, s) in enumerate(labeled_series):
+        color = _COLORS.get(i, "gray")
+        if not ref_drawn:
+            left.plot(s["t"], s[cmd_key], color="black", lw=2.2, label="commanded", zorder=10)
+            ref_drawn = True
+        left.plot(s["t"], s[actual_key], color=color, lw=1.3, label=label, alpha=0.9)
+        right.plot(s["t"], s[err_key], color=color, lw=1.3, label=label, alpha=0.9)
+
+    right.axhline(0.0, color="black", lw=0.8, alpha=0.5)
+    left.set_ylabel(ylabel)
+    left.set_title(f"{row_title}: commanded vs actual")
+    left.grid(True, alpha=0.3)
+    left.legend(fontsize=8)
+    right.set_ylabel(err_ylabel)
+    right.set_title(f"{row_title}: error (actual - commanded)")
+    right.grid(True, alpha=0.3)
+    right.legend(fontsize=8)
+
+
 def plot_combined(
     path_name: str,
     labeled_series: list[tuple[str, dict[str, np.ndarray]]],
@@ -129,39 +168,59 @@ def plot_combined(
     import matplotlib.pyplot as plt
 
     fig, axes = plt.subplots(3, 2, figsize=(14, 11), sharex=False)
-    channels = [
-        ("x position", "x (m)", "actual_x", "cmd_x", "err_x", "error (m)"),
-        ("y position", "y (m)", "actual_y", "cmd_y", "err_y", "error (m)"),
-        ("heading", "heading (deg)", "actual_yaw", "cmd_yaw", "err_yaw", "error (deg)"),
-    ]
-
-    for row, (title, ylabel, actual_key, cmd_key, err_key, err_ylabel) in enumerate(channels):
-        left, right = axes[row]
-
-        ref_drawn = False
-        for i, (label, s) in enumerate(labeled_series):
-            color = _COLORS.get(i, "gray")
-            if not ref_drawn:
-                left.plot(s["t"], s[cmd_key], color="black", lw=2.2, label="commanded", zorder=10)
-                ref_drawn = True
-            left.plot(s["t"], s[actual_key], color=color, lw=1.3, label=label, alpha=0.9)
-            right.plot(s["t"], s[err_key], color=color, lw=1.3, label=label, alpha=0.9)
-
-        right.axhline(0.0, color="black", lw=0.8, alpha=0.5)
-        left.set_ylabel(ylabel)
-        left.set_title(f"{title}: commanded vs actual")
-        left.grid(True, alpha=0.3)
-        left.legend(fontsize=8)
-        right.set_ylabel(err_ylabel)
-        right.set_title(f"{title}: error (actual - commanded)")
-        right.grid(True, alpha=0.3)
-        right.legend(fontsize=8)
+    for row, (title, ylabel, actual_key, cmd_key, err_key, err_ylabel) in enumerate(_CHANNELS):
+        _draw_row(
+            axes[row][0], axes[row][1], title, ylabel, err_ylabel,
+            actual_key, cmd_key, err_key, labeled_series,
+        )
 
     axes[-1][0].set_xlabel("time (s)")
     axes[-1][1].set_xlabel("time (s)")
 
     fig.suptitle(f"{path_name} @ {speed:g} m/s -- controller comparison", fontsize=14)
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.97))
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+
+
+def plot_all_combined(
+    per_path_series: list[tuple[str, list[tuple[str, dict[str, np.ndarray]]]]],
+    speed: float,
+    out_path: str | FsPath,
+) -> None:
+    """One giant figure: every full-pose trajectory stacked, each with its own
+    x/y/heading x (commanded-vs-actual | error) block, all controllers overlaid."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    n_paths = len(per_path_series)
+    n_rows = n_paths * 3
+    fig, axes = plt.subplots(n_rows, 2, figsize=(16, 3.6 * n_rows), sharex=False)
+    if n_rows == 1:
+        axes = axes.reshape(1, 2)
+
+    for p_idx, (path_name, labeled_series) in enumerate(per_path_series):
+        for c_idx, (title, ylabel, actual_key, cmd_key, err_key, err_ylabel) in enumerate(_CHANNELS):
+            row = p_idx * 3 + c_idx
+            _draw_row(
+                axes[row][0], axes[row][1],
+                f"[{path_name}] {title}", ylabel, err_ylabel,
+                actual_key, cmd_key, err_key, labeled_series,
+            )
+
+    axes[-1][0].set_xlabel("time (s)")
+    axes[-1][1].set_xlabel("time (s)")
+
+    fig_height_in = 3.6 * n_rows
+    fig.tight_layout()
+    fig.subplots_adjust(top=1.0 - (1.4 / fig_height_in))
+    fig.suptitle(
+        f"Full-pose trajectory comparison @ {speed:g} m/s (all controllers, all trajectories)",
+        fontsize=16,
+        y=1.0 - (0.3 / fig_height_in),
+    )
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
 
@@ -185,6 +244,8 @@ def main() -> None:
     out_dir = FsPath(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    per_path_series: list[tuple[str, list[tuple[str, dict[str, np.ndarray]]]]] = []
+
     for path_name in FULLPOSE_PATHS:
         labeled_series = []
         for d, label in labeled_dirs:
@@ -205,6 +266,13 @@ def main() -> None:
         out_path = out_dir / f"{path_name}_v{args.speed:.2f}_combined.png"
         plot_combined(path_name, labeled_series, args.speed, out_path)
         print(f"wrote {out_path}")
+
+        per_path_series.append((path_name, labeled_series))
+
+    if per_path_series:
+        all_out_path = out_dir / f"all_fullpose_v{args.speed:.2f}_combined.png"
+        plot_all_combined(per_path_series, args.speed, all_out_path)
+        print(f"wrote {all_out_path}")
 
 
 if __name__ == "__main__":
