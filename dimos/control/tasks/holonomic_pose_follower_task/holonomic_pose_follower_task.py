@@ -150,14 +150,13 @@ class HolonomicPoseFollowerTask(BaseControlTask):
         )
 
     def is_active(self) -> bool:
-        return self._state in ("tracking", "settling", "stopping")
+        return self._state in ("tracking", "settling", "stopping") or self._pending_path is not None
 
     def compute(self, state: CoordinatorState) -> JointCommandOutput | None:
         if self._pending_path is not None:
             # Arm a stream-delivered path on the first tick that carries a pose;
             # the card handler has no odom to hand us.
             armed = self._read_pose(state)
-            logger.warning(f"DEBUG compute: pending_path set, armed={armed}, joints={dict(state.joints.joint_positions)}")
             if armed is not None:
                 path, self._pending_path = self._pending_path, None
                 self.start_path(path, _pose_stamped(armed))
