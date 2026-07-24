@@ -73,6 +73,28 @@ def _to_canonical(x: np.ndarray, y: np.ndarray, yaw: np.ndarray, ox: float, oy: 
     return xc, yc, yawc
 
 
+_WINDOW_BACK = 5
+_WINDOW_FWD = 15
+
+
+def _windowed_nearest_segment(
+    pt: np.ndarray, ref_xy: np.ndarray, last_idx: int | None
+) -> tuple[int, float, float]:
+    """Like ``nearest_segment``, but searches only near the last match instead
+    of the whole path -- a global search is ambiguous on loop paths, where the
+    start and end are the same point. Seeded at index 0 on the first call,
+    since every run is anchored so the path starts where the robot starts."""
+    n_segs = len(ref_xy) - 1
+    if last_idx is None:
+        lo, hi = 0, min(n_segs, _WINDOW_FWD)
+    else:
+        lo = max(0, last_idx - _WINDOW_BACK)
+        hi = min(n_segs, last_idx + _WINDOW_FWD)
+
+    seg_idx, dist, t_along = nearest_segment(pt, ref_xy[lo : hi + 1])
+    return lo + seg_idx, dist, t_along
+
+
 def _series(rec: RunRecording) -> dict[str, np.ndarray]:
     """Commanded + actual x/y/heading (canonical frame), and their errors."""
     ox, oy, th = _canonical_frame(rec.reference)
@@ -89,9 +111,11 @@ def _series(rec: RunRecording) -> dict[str, np.ndarray]:
     cmd_x = np.empty_like(actual_x)
     cmd_y = np.empty_like(actual_y)
     cmd_yaw = np.empty_like(actual_yaw)
+    last_idx: int | None = None
     for i in range(len(actual_x)):
         pt = np.array([actual_x[i], actual_y[i]])
-        seg_idx, _dist, t_along = nearest_segment(pt, ref_xy)
+        seg_idx, _dist, t_along = _windowed_nearest_segment(pt, ref_xy, last_idx)
+        last_idx = seg_idx
         foot = ref_xy[seg_idx] + t_along * (ref_xy[seg_idx + 1] - ref_xy[seg_idx])
         cmd_x[i], cmd_y[i] = foot
         cmd_yaw[i] = _reference_yaw(ref_yaw, seg_idx, t_along)
