@@ -84,7 +84,7 @@ def _series(rec: RunRecording) -> dict[str, np.ndarray]:
     t = t - t[0]
     actual_x = np.array([tick[1] for tick in rec.ticks], dtype=np.float64)
     actual_y = np.array([tick[2] for tick in rec.ticks], dtype=np.float64)
-    actual_yaw = np.array([tick[3] for tick in rec.ticks], dtype=np.float64)
+    actual_yaw = np.unwrap(np.array([tick[3] for tick in rec.ticks], dtype=np.float64))
 
     cmd_x = np.empty_like(actual_x)
     cmd_y = np.empty_like(actual_y)
