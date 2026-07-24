@@ -22,15 +22,19 @@ from pathlib import Path
 from typing import Any
 
 from dimos.constants import RECORDINGS_DIR
+from dimos.control.components import HardwareComponent, HardwareType, make_twist_base_joints
+from dimos.control.coordinator import ControlCoordinator, TaskConfig
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.global_config import global_config
 from dimos.core.stream import In
+from dimos.core.transport import LCMTransport
 from dimos.hardware.sensors.lidar.pointlio.module import PointLio
 from dimos.hardware.sensors.lidar.pointlio.recorder import PointlioRecorder
 from dimos.hardware.sensors.lidar.virtual_mid360.recorder import Mid360PcapRecorder
 from dimos.mapping.ray_tracing.module import RayTracingVoxelMap
 from dimos.memory2.module import pose_setter_for
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.navigation.basic_path_follower.module import BasicPathFollower
 from dimos.navigation.movement_manager.movement_manager import MovementManager
@@ -45,6 +49,8 @@ from dimos.robot.unitree.go2.go2_mid360_static_transforms import (
     base_link_from_mid360,
 )
 from dimos.visualization.vis_module import vis_module
+
+_go2_joints = make_twist_base_joints("go2")
 
 voxel_size = 0.08
 # Raise above 0 to draw what the planner searched over (surface, nodes, weighted edges).
@@ -173,7 +179,26 @@ unitree_go2_nav_3d = autoconnect(
         [
             (GO2Connection, "lidar", "lidar_l1"),
             (GO2Connection, "odom", "odom_go2"),
+            (GO2Connection, "cmd_vel", "go2_cmd_vel"),
         ]
+    ),
+    ControlCoordinator.blueprint(
+        hardware=[
+            HardwareComponent(
+                hardware_id="go2",
+                hardware_type=HardwareType.BASE,
+                joints=_go2_joints,
+                adapter_type="transport_lcm",
+            ),
+        ],
+        tasks=[
+            TaskConfig(
+                name="vel_go2",
+                type="velocity",
+                joint_names=_go2_joints,
+                priority=10,
+            ),
+        ],
     ),
     PointLio.blueprint(),
     # Level pointlio's tilted-sensor odometry into the body frame so the follower
@@ -206,6 +231,13 @@ unitree_go2_nav_3d = autoconnect(
         [(BasicPathFollower, "odometry", "body_odometry")]
     ),
     MovementManager.blueprint(),
+).transports(
+    {
+        ("cmd_vel", Twist): LCMTransport("/cmd_vel", Twist),
+        ("twist_command", Twist): LCMTransport("/cmd_vel", Twist),
+        ("go2_cmd_vel", Twist): LCMTransport("/go2/cmd_vel", Twist),
+        ("odom_go2", PoseStamped): LCMTransport("/go2/odom", PoseStamped),
+    }
 ).global_config(n_workers=10, robot_model="unitree_go2", obstacle_avoidance=False)
 
 # The nav blueprint leaves PointLio on its default lidar / odometry topics, so
