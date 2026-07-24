@@ -157,6 +157,7 @@ class HolonomicPoseFollowerTask(BaseControlTask):
             # Arm a stream-delivered path on the first tick that carries a pose;
             # the card handler has no odom to hand us.
             armed = self._read_pose(state)
+            logger.warning(f"DEBUG compute: pending_path set, armed={armed}, joints={dict(state.joints.joint_positions)}")
             if armed is not None:
                 path, self._pending_path = self._pending_path, None
                 self.start_path(path, _pose_stamped(armed))
