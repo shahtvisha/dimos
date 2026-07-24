@@ -45,10 +45,10 @@ from dimos.utils.trigonometry import angle_diff
 FULLPOSE_PATHS = ("straight_rotate_90", "strafe_left_2m", "circle_offset_45", "square_crab")
 
 _COLORS = {
-    0: "tab:red",
-    1: "tab:blue",
-    2: "tab:green",
-    3: "tab:purple",
+    0: "#0072B2",
+    1: "#D55E00",
+    2: "#009E73",
+    3: "#CC79A7",
 }
 
 
@@ -117,10 +117,13 @@ def _series(rec: RunRecording) -> dict[str, np.ndarray]:
     }
 
 
+POS_ERR_LIM = 0.30  # m
+HEAD_ERR_LIM = 120.0  # deg
+
 _CHANNELS = [
-    ("x position", "x (m)", "actual_x", "cmd_x", "err_x", "error (m)"),
-    ("y position", "y (m)", "actual_y", "cmd_y", "err_y", "error (m)"),
-    ("heading", "heading (deg)", "actual_yaw", "cmd_yaw", "err_yaw", "error (deg)"),
+    ("x position", "x (m)", "actual_x", "cmd_x", "err_x", "error (m)", POS_ERR_LIM, "m"),
+    ("y position", "y (m)", "actual_y", "cmd_y", "err_y", "error (m)", POS_ERR_LIM, "m"),
+    ("heading", "heading (deg)", "actual_yaw", "cmd_yaw", "err_yaw", "error (deg)", HEAD_ERR_LIM, "deg"),
 ]
 
 
@@ -133,6 +136,8 @@ def _draw_row(
     actual_key: str,
     cmd_key: str,
     err_key: str,
+    err_lim: float,
+    unit: str,
     labeled_series: list[tuple[str, dict[str, np.ndarray]]],
 ) -> None:
     """Draw one channel's commanded-vs-actual + error pair into the given axes."""
@@ -143,9 +148,20 @@ def _draw_row(
             left.plot(s["t"], s[cmd_key], color="black", lw=2.2, label="commanded", zorder=10)
             ref_drawn = True
         left.plot(s["t"], s[actual_key], color=color, lw=1.3, label=label, alpha=0.9)
+        left.plot(s["t"][-1], s[actual_key][-1], "o", ms=4.5, color=color, zorder=11)
         right.plot(s["t"], s[err_key], color=color, lw=1.3, label=label, alpha=0.9)
 
+        err = s[err_key]
+        worst = int(np.nanargmax(np.abs(err)))
+        right.annotate(
+            f"{err[worst]:+.3f}{unit}",
+            (s["t"][worst], err[worst]),
+            textcoords="offset points", xytext=(0, 8),
+            ha="center", fontsize=7.5, color=color,
+        )
+
     right.axhline(0.0, color="black", lw=0.8, alpha=0.5)
+    right.set_ylim(-err_lim, err_lim)
     left.set_ylabel(ylabel)
     left.set_title(f"{row_title}: commanded vs actual")
     left.grid(True, alpha=0.3)
@@ -168,10 +184,10 @@ def plot_combined(
     import matplotlib.pyplot as plt
 
     fig, axes = plt.subplots(3, 2, figsize=(14, 11), sharex=False)
-    for row, (title, ylabel, actual_key, cmd_key, err_key, err_ylabel) in enumerate(_CHANNELS):
+    for row, (title, ylabel, actual_key, cmd_key, err_key, err_ylabel, err_lim, unit) in enumerate(_CHANNELS):
         _draw_row(
             axes[row][0], axes[row][1], title, ylabel, err_ylabel,
-            actual_key, cmd_key, err_key, labeled_series,
+            actual_key, cmd_key, err_key, err_lim, unit, labeled_series,
         )
 
     axes[-1][0].set_xlabel("time (s)")
@@ -202,12 +218,12 @@ def plot_all_combined(
         axes = axes.reshape(1, 2)
 
     for p_idx, (path_name, labeled_series) in enumerate(per_path_series):
-        for c_idx, (title, ylabel, actual_key, cmd_key, err_key, err_ylabel) in enumerate(_CHANNELS):
+        for c_idx, (title, ylabel, actual_key, cmd_key, err_key, err_ylabel, err_lim, unit) in enumerate(_CHANNELS):
             row = p_idx * 3 + c_idx
             _draw_row(
                 axes[row][0], axes[row][1],
                 f"[{path_name}] {title}", ylabel, err_ylabel,
-                actual_key, cmd_key, err_key, labeled_series,
+                actual_key, cmd_key, err_key, err_lim, unit, labeled_series,
             )
 
     axes[-1][0].set_xlabel("time (s)")
