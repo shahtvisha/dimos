@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""One combined commanded-vs-actual + error figure per full-pose trajectory,
-with all given controllers overlaid, at a single speed.
+"""One combined commanded-vs-actual + error figure per (path, speed), with all
+given controllers overlaid. Covers every path and every speed found in the
+given recording directories -- pass --path/--speed to restrict to one.
 
 Each controller's run was anchored to wherever the robot happened to start
 that session, so runs are transformed into a shared canonical frame first
@@ -22,11 +23,16 @@ that session, so runs are transformed into a shared canonical frame first
 score.py's ``_canonicalize``, extended here to also rotate heading values,
 not just position) so all controllers' commanded/actual lines line up.
 
+Paths in FULLPOSE_PATHS command heading independently of travel direction;
+every other path's "commanded heading" is just its direction of travel
+(tangent-following) -- the heading row is labeled accordingly so a decoupled
+plot is never mistaken for a tangent one, or vice versa.
+
     python -m dimos.control.benchmarking.plot_tracking_combined \\
         data/benchmark/go2_mustafa_final:Mustafa \\
         data/benchmark/go2_dan_final:Dan \\
         data/benchmark/go2_pcontroller:P-controller \\
-        --speed 0.5 --out-dir data/benchmark/fullpose_combined
+        --out-dir data/benchmark/tracking_combined
 """
 
 from __future__ import annotations
@@ -196,6 +202,10 @@ def _draw_row(
     right.legend(fontsize=8)
 
 
+def _heading_kind(path_name: str) -> str:
+    return "decoupled heading" if path_name in FULLPOSE_PATHS else "tangent heading"
+
+
 def plot_combined(
     path_name: str,
     labeled_series: list[tuple[str, dict[str, np.ndarray]]],
@@ -209,8 +219,9 @@ def plot_combined(
 
     fig, axes = plt.subplots(3, 2, figsize=(14, 11), sharex=False)
     for row, (title, ylabel, actual_key, cmd_key, err_key, err_ylabel, err_lim, unit) in enumerate(_CHANNELS):
+        row_title = f"{title} ({_heading_kind(path_name)})" if title == "heading" else title
         _draw_row(
-            axes[row][0], axes[row][1], title, ylabel, err_ylabel,
+            axes[row][0], axes[row][1], row_title, ylabel, err_ylabel,
             actual_key, cmd_key, err_key, err_lim, unit, labeled_series,
         )
 
@@ -223,55 +234,14 @@ def plot_combined(
     plt.close(fig)
 
 
-def plot_all_combined(
-    per_path_series: list[tuple[str, list[tuple[str, dict[str, np.ndarray]]]]],
-    speed: float,
-    out_path: str | FsPath,
-) -> None:
-    """One giant figure: every full-pose trajectory stacked, each with its own
-    x/y/heading x (commanded-vs-actual | error) block, all controllers overlaid."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    n_paths = len(per_path_series)
-    n_rows = n_paths * 3
-    fig, axes = plt.subplots(n_rows, 2, figsize=(16, 3.6 * n_rows), sharex=False)
-    if n_rows == 1:
-        axes = axes.reshape(1, 2)
-
-    for p_idx, (path_name, labeled_series) in enumerate(per_path_series):
-        for c_idx, (title, ylabel, actual_key, cmd_key, err_key, err_ylabel, err_lim, unit) in enumerate(_CHANNELS):
-            row = p_idx * 3 + c_idx
-            _draw_row(
-                axes[row][0], axes[row][1],
-                f"[{path_name}] {title}", ylabel, err_ylabel,
-                actual_key, cmd_key, err_key, err_lim, unit, labeled_series,
-            )
-
-    axes[-1][0].set_xlabel("time (s)")
-    axes[-1][1].set_xlabel("time (s)")
-
-    fig_height_in = 3.6 * n_rows
-    fig.tight_layout()
-    fig.subplots_adjust(top=1.0 - (1.4 / fig_height_in))
-    fig.suptitle(
-        f"Full-pose trajectory comparison @ {speed:g} m/s (all controllers, all trajectories)",
-        fontsize=16,
-        y=1.0 - (0.3 / fig_height_in),
-    )
-    fig.savefig(out_path, dpi=130)
-    plt.close(fig)
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Combined commanded-vs-actual + error plots, all controllers overlaid, full-pose paths only"
+        description="Combined commanded-vs-actual + error plot per (path, speed), all controllers overlaid"
     )
     ap.add_argument("dirs", nargs="+", help="one or more <recordings_dir>:<label> pairs")
-    ap.add_argument("--speed", type=float, default=0.5)
-    ap.add_argument("--out-dir", default="data/benchmark/fullpose_combined")
+    ap.add_argument("--path", default=None, help="restrict to one path name (default: all)")
+    ap.add_argument("--speed", type=float, default=None, help="restrict to one speed (default: all)")
+    ap.add_argument("--out-dir", default="data/benchmark/tracking_combined")
     args = ap.parse_args()
 
     labeled_dirs = []
@@ -284,35 +254,39 @@ def main() -> None:
     out_dir = FsPath(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    per_path_series: list[tuple[str, list[tuple[str, dict[str, np.ndarray]]]]] = []
+    # Load each dir once; filter in memory per (path, speed) below.
+    recs_by_label = {label: load_recordings(d) for d, label in labeled_dirs}
 
-    for path_name in FULLPOSE_PATHS:
+    combos = sorted(
+        {(r.path, r.speed) for recs in recs_by_label.values() for r in recs}
+    )
+    if args.path is not None:
+        combos = [c for c in combos if c[0] == args.path]
+    if args.speed is not None:
+        combos = [c for c in combos if math.isclose(c[1], args.speed, abs_tol=1e-6)]
+    if not combos:
+        raise SystemExit("no matching (path, speed) combinations found")
+
+    written = 0
+    for path_name, speed in combos:
         labeled_series = []
-        for d, label in labeled_dirs:
-            recs = [
-                r
-                for r in load_recordings(d)
-                if r.path == path_name and math.isclose(r.speed, args.speed, abs_tol=1e-6)
-            ]
-            if not recs:
-                print(f"skip {label} for {path_name}: no matching recording at {args.speed:g} m/s")
+        for label, recs in recs_by_label.items():
+            matches = [r for r in recs if r.path == path_name and math.isclose(r.speed, speed, abs_tol=1e-6)]
+            if not matches:
+                print(f"skip {label} for {path_name} @ {speed:g} m/s: no matching recording")
                 continue
-            labeled_series.append((label, _series(recs[0])))
+            labeled_series.append((label, _series(matches[0])))
 
         if not labeled_series:
-            print(f"skip {path_name}: no controllers have data")
+            print(f"skip {path_name} @ {speed:g} m/s: no controllers have data")
             continue
 
-        out_path = out_dir / f"{path_name}_v{args.speed:.2f}_combined.png"
-        plot_combined(path_name, labeled_series, args.speed, out_path)
+        out_path = out_dir / f"{path_name}_v{speed:.2f}_combined.png"
+        plot_combined(path_name, labeled_series, speed, out_path)
         print(f"wrote {out_path}")
+        written += 1
 
-        per_path_series.append((path_name, labeled_series))
-
-    if per_path_series:
-        all_out_path = out_dir / f"all_fullpose_v{args.speed:.2f}_combined.png"
-        plot_all_combined(per_path_series, args.speed, all_out_path)
-        print(f"wrote {all_out_path}")
+    print(f"done -- {written} plot(s) written to {out_dir}")
 
 
 if __name__ == "__main__":
