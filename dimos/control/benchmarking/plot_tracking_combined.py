@@ -288,11 +288,9 @@ def main() -> None:
     ap.add_argument(
         "--fullpose-summary",
         action="store_true",
-        help="also write one stacked summary of all full-pose paths (requires --speed)",
+        help="also write one stacked full-pose summary per speed found in the data",
     )
     args = ap.parse_args()
-    if args.fullpose_summary and args.speed is None:
-        raise SystemExit("--fullpose-summary requires --speed (the summary is one speed at a time)")
 
     labeled_dirs = []
     for entry in args.dirs:
@@ -318,7 +316,7 @@ def main() -> None:
         raise SystemExit("no matching (path, speed) combinations found")
 
     written = 0
-    fullpose_series: list[tuple[str, list[tuple[str, dict[str, np.ndarray]]]]] = []
+    fullpose_by_speed: dict[float, list[tuple[str, list[tuple[str, dict[str, np.ndarray]]]]]] = {}
     for path_name, speed in combos:
         labeled_series = []
         for label, recs in recs_by_label.items():
@@ -338,16 +336,17 @@ def main() -> None:
         written += 1
 
         if args.fullpose_summary and path_name in FULLPOSE_PATHS:
-            fullpose_series.append((path_name, labeled_series))
+            fullpose_by_speed.setdefault(speed, []).append((path_name, labeled_series))
 
     print(f"done -- {written} plot(s) written to {out_dir}")
 
     if args.fullpose_summary:
-        if not fullpose_series:
+        if not fullpose_by_speed:
             raise SystemExit("--fullpose-summary given but no full-pose paths matched")
-        summary_path = out_dir / f"all_fullpose_v{args.speed:.2f}_combined.png"
-        plot_all_fullpose_combined(fullpose_series, args.speed, summary_path)
-        print(f"wrote {summary_path}")
+        for speed, fullpose_series in sorted(fullpose_by_speed.items()):
+            summary_path = out_dir / f"all_fullpose_v{speed:.2f}_combined.png"
+            plot_all_fullpose_combined(fullpose_series, speed, summary_path)
+            print(f"wrote {summary_path}")
 
 
 if __name__ == "__main__":
