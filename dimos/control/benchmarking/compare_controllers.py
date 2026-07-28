@@ -20,9 +20,9 @@ Reuses the same recording-loading and trajectory-canonicalization logic as
 column per controller.
 
     python -m dimos.control.benchmarking.compare_controllers \\
-        data/benchmark/go2:Mustafa \\
-        data/benchmark/go2_dan_final:Dan \\
-        data/benchmark/go2_pf:P-controller \\
+        data/benchmark/go2:"Holonomic Pose Controller" \\
+        data/benchmark/go2_dan_final:"Holonomic Velocity Controller" \\
+        data/benchmark/go2_pf:"Baseline P-Controller" \\
         --out data/benchmark/controller_comparison.png
 """
 
@@ -110,7 +110,7 @@ def main() -> None:
     ap.add_argument(
         "dirs",
         nargs="+",
-        help="one or more <recordings_dir>:<label> pairs, e.g. data/benchmark/go2:Mustafa",
+        help='one or more <recordings_dir>:<label> pairs, e.g. data/benchmark/go2:"Holonomic Pose Controller"',
     )
     ap.add_argument("--out", default="data/benchmark/controller_comparison.png")
     args = ap.parse_args()

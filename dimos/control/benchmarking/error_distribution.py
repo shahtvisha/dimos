@@ -25,9 +25,9 @@ question -- "how much does this vary run to run?") or the full path x speed
 sweep (a looser proxy, pooled across conditions -- the title says which).
 
     python -m dimos.control.benchmarking.error_distribution \\
-        data/benchmark/go2_mustafa_final:Mustafa \\
-        data/benchmark/go2_dan_final:Dan \\
-        data/benchmark/go2_pcontroller:P-controller \\
+        data/benchmark/go2_mustafa_final:"Holonomic Pose Controller" \\
+        data/benchmark/go2_dan_final:"Holonomic Velocity Controller" \\
+        data/benchmark/go2_pcontroller:"Baseline P-Controller" \\
         [--path circle_offset_45] [--speed 0.5] [--out dist.png] [--json dist.json]
 
 Note: ``score_run`` does a global nearest-point search, which is ambiguous on
