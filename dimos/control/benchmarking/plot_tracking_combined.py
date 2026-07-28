@@ -234,6 +234,49 @@ def plot_combined(
     plt.close(fig)
 
 
+def plot_all_fullpose_combined(
+    per_path_series: list[tuple[str, list[tuple[str, dict[str, np.ndarray]]]]],
+    speed: float,
+    out_path: str | FsPath,
+) -> None:
+    """One stacked figure: every full-pose trajectory, each with its own
+    x/y/heading x (commanded-vs-actual | error) block, all controllers overlaid."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    n_paths = len(per_path_series)
+    n_rows = n_paths * 3
+    fig, axes = plt.subplots(n_rows, 2, figsize=(16, 3.6 * n_rows), sharex=False)
+    if n_rows == 1:
+        axes = axes.reshape(1, 2)
+
+    for p_idx, (path_name, labeled_series) in enumerate(per_path_series):
+        for c_idx, (title, ylabel, actual_key, cmd_key, err_key, err_ylabel, err_lim, unit) in enumerate(_CHANNELS):
+            row = p_idx * 3 + c_idx
+            row_title = f"[{path_name}] {title} ({_heading_kind(path_name)})" if title == "heading" else f"[{path_name}] {title}"
+            _draw_row(
+                axes[row][0], axes[row][1],
+                row_title, ylabel, err_ylabel,
+                actual_key, cmd_key, err_key, err_lim, unit, labeled_series,
+            )
+
+    axes[-1][0].set_xlabel("time (s)")
+    axes[-1][1].set_xlabel("time (s)")
+
+    fig_height_in = 3.6 * n_rows
+    fig.tight_layout()
+    fig.subplots_adjust(top=1.0 - (1.4 / fig_height_in))
+    fig.suptitle(
+        f"Full-pose trajectory comparison @ {speed:g} m/s (all controllers, all full-pose paths)",
+        fontsize=16,
+        y=1.0 - (0.3 / fig_height_in),
+    )
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="Combined commanded-vs-actual + error plot per (path, speed), all controllers overlaid"
@@ -242,7 +285,14 @@ def main() -> None:
     ap.add_argument("--path", default=None, help="restrict to one path name (default: all)")
     ap.add_argument("--speed", type=float, default=None, help="restrict to one speed (default: all)")
     ap.add_argument("--out-dir", default="data/benchmark/tracking_combined")
+    ap.add_argument(
+        "--fullpose-summary",
+        action="store_true",
+        help="also write one stacked summary of all full-pose paths (requires --speed)",
+    )
     args = ap.parse_args()
+    if args.fullpose_summary and args.speed is None:
+        raise SystemExit("--fullpose-summary requires --speed (the summary is one speed at a time)")
 
     labeled_dirs = []
     for entry in args.dirs:
@@ -268,6 +318,7 @@ def main() -> None:
         raise SystemExit("no matching (path, speed) combinations found")
 
     written = 0
+    fullpose_series: list[tuple[str, list[tuple[str, dict[str, np.ndarray]]]]] = []
     for path_name, speed in combos:
         labeled_series = []
         for label, recs in recs_by_label.items():
@@ -286,7 +337,17 @@ def main() -> None:
         print(f"wrote {out_path}")
         written += 1
 
+        if args.fullpose_summary and path_name in FULLPOSE_PATHS:
+            fullpose_series.append((path_name, labeled_series))
+
     print(f"done -- {written} plot(s) written to {out_dir}")
+
+    if args.fullpose_summary:
+        if not fullpose_series:
+            raise SystemExit("--fullpose-summary given but no full-pose paths matched")
+        summary_path = out_dir / f"all_fullpose_v{args.speed:.2f}_combined.png"
+        plot_all_fullpose_combined(fullpose_series, args.speed, summary_path)
+        print(f"wrote {summary_path}")
 
 
 if __name__ == "__main__":
