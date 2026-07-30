@@ -255,39 +255,59 @@ def _derive_commanded(rec: RunRecording) -> list[tuple[float, float, float, floa
     return out
 
 
-def build_store(rec: RunRecording, out_path: str | FsPath) -> None:
-    """Single recording, single controller (orange actual vs. black commanded)."""
-    store = SqliteStore(path=str(out_path))
-    actual_stream = store.stream("actual_pose", payload_type=ActualPose)
-    cmd_stream = store.stream("commanded_pose", payload_type=CommandedPose)
-    commanded_path_stream = store.stream("commanded_path", payload_type=PathLine)
-    actual_path_stream = store.stream("actual_path", payload_type=PathLine)
-    err_x_stream = store.stream("err_x_m", payload_type=Scalar)
-    err_y_stream = store.stream("err_y_m", payload_type=Scalar)
-    err_yaw_stream = store.stream("err_yaw_deg", payload_type=Scalar)
-    actual_x_stream = store.stream("actual_x_m", payload_type=Scalar)
-    cmd_x_stream = store.stream("cmd_x_m", payload_type=Scalar)
-    actual_y_stream = store.stream("actual_y_m", payload_type=Scalar)
-    cmd_y_stream = store.stream("cmd_y_m", payload_type=Scalar)
-    actual_yaw_stream = store.stream("actual_yaw_deg", payload_type=Scalar)
-    cmd_yaw_stream = store.stream("cmd_yaw_deg", payload_type=Scalar)
+def _stream_name(prefix: str, suffix: str) -> str:
+    """"<prefix>_<suffix>", or a bare "<suffix>" when prefix is empty -- lets
+    build_store() reuse _write_run() below while keeping its original,
+    unprefixed stream names ("actual_pose", not "_actual_pose")."""
+    return suffix if not prefix else f"{prefix}_{suffix}"
 
-    commanded_path_stream.append(
-        PathLine([(p[0], p[1]) for p in rec.reference], _COMMANDED_COLOR), ts=0.0
-    )
+
+def _write_run(
+    store: SqliteStore,
+    prefix: str,
+    rec: RunRecording,
+    pose_cls: type[PoseStamped],
+    color: list[int],
+    *,
+    write_commanded: bool = True,
+) -> None:
+    """Writes one run's full stream set (actual pose, growing path trail,
+    error and actual-vs-commanded scalars) under "<prefix>_...". The
+    single-recording and master-store modes each want their own commanded
+    arrow + reference path (write_commanded=True, the default); the
+    combined-overlay mode shares one reference path across controllers
+    instead, so it draws that itself and passes write_commanded=False."""
+    actual_stream = store.stream(_stream_name(prefix, "actual_pose"), payload_type=pose_cls)
+    actual_path_stream = store.stream(_stream_name(prefix, "actual_path"), payload_type=PathLine)
+    err_x_stream = store.stream(_stream_name(prefix, "err_x_m"), payload_type=Scalar)
+    err_y_stream = store.stream(_stream_name(prefix, "err_y_m"), payload_type=Scalar)
+    err_yaw_stream = store.stream(_stream_name(prefix, "err_yaw_deg"), payload_type=Scalar)
+    actual_x_stream = store.stream(_stream_name(prefix, "actual_x_m"), payload_type=Scalar)
+    cmd_x_stream = store.stream(_stream_name(prefix, "cmd_x_m"), payload_type=Scalar)
+    actual_y_stream = store.stream(_stream_name(prefix, "actual_y_m"), payload_type=Scalar)
+    cmd_y_stream = store.stream(_stream_name(prefix, "cmd_y_m"), payload_type=Scalar)
+    actual_yaw_stream = store.stream(_stream_name(prefix, "actual_yaw_deg"), payload_type=Scalar)
+    cmd_yaw_stream = store.stream(_stream_name(prefix, "cmd_yaw_deg"), payload_type=Scalar)
+
+    if write_commanded:
+        cmd_stream = store.stream(_stream_name(prefix, "commanded_pose"), payload_type=CommandedPose)
+        store.stream(_stream_name(prefix, "commanded_path"), payload_type=PathLine).append(
+            PathLine([(p[0], p[1]) for p in rec.reference], _COMMANDED_COLOR), ts=0.0
+        )
 
     actual_trail: list[tuple[float, float]] = []
     for ts, x, y, yaw, cx, cy, cyaw in _derive_commanded(rec):
         actual_trail.append((x, y))
         actual_stream.append(
-            ActualPose(ts=ts, position=Vector3(x, y, 0.0), orientation=Quaternion.from_euler(Vector3(0.0, 0.0, yaw))),
+            pose_cls(ts=ts, position=Vector3(x, y, 0.0), orientation=Quaternion.from_euler(Vector3(0.0, 0.0, yaw))),
             ts=ts,
         )
-        cmd_stream.append(
-            CommandedPose(ts=ts, position=Vector3(cx, cy, 0.0), orientation=Quaternion.from_euler(Vector3(0.0, 0.0, cyaw))),
-            ts=ts,
-        )
-        actual_path_stream.append(PathLine(list(actual_trail), _PALETTE[1]), ts=ts)
+        if write_commanded:
+            cmd_stream.append(
+                CommandedPose(ts=ts, position=Vector3(cx, cy, 0.0), orientation=Quaternion.from_euler(Vector3(0.0, 0.0, cyaw))),
+                ts=ts,
+            )
+        actual_path_stream.append(PathLine(list(actual_trail), color), ts=ts)
 
         err_x_stream.append(Scalar(x - cx), ts=ts)
         err_y_stream.append(Scalar(y - cy), ts=ts)
@@ -299,13 +319,19 @@ def build_store(rec: RunRecording, out_path: str | FsPath) -> None:
         actual_yaw_stream.append(Scalar(math.degrees(yaw)), ts=ts)
         cmd_yaw_stream.append(Scalar(math.degrees(cyaw)), ts=ts)
 
+
+def build_store(rec: RunRecording, out_path: str | FsPath) -> None:
+    """Single recording, single controller (orange actual vs. black commanded)."""
+    store = SqliteStore(path=str(out_path))
+    _write_run(store, "", rec, ActualPose, _PALETTE[1])
     store.stop()  # checkpoints and closes the WAL files before this returns
 
 
 def build_combined_store(labeled_recs: list[tuple[str, RunRecording]], out_path: str | FsPath) -> None:
     """Multiple controllers, same (path, speed), overlaid in one store: one
-    shared static reference path, per-controller colored actual pose/path/
-    scalar streams under a "<label>/" prefix."""
+    shared static reference path drawn once (not per controller -- overlapping
+    identical black arrows would add nothing), plus each controller's colored
+    actual pose/path/scalar streams under a "<label>_" prefix."""
     store = SqliteStore(path=str(out_path))
 
     ref = labeled_recs[0][1].reference
@@ -317,41 +343,10 @@ def build_combined_store(labeled_recs: list[tuple[str, RunRecording]], out_path:
         pose_cls = _ACTUAL_POSE_CLASSES[i % len(_ACTUAL_POSE_CLASSES)]
         color = _PALETTE[i % len(_PALETTE)]
         # memory2 stream names must be valid SQL identifiers -- no spaces or
-        # slashes -- so a human label like "Holonomic Pose Controller" gets
+        # slashes -- so a human label like "Holonomic Pose Controller" is
         # sanitized here; the entity tree in rerun is flat, not nested, as a
         # result, but everything still renders correctly.
-        p = _safe_ident(label)
-
-        actual_stream = store.stream(f"{p}_actual_pose", payload_type=pose_cls)
-        actual_path_stream = store.stream(f"{p}_actual_path", payload_type=PathLine)
-        err_x_stream = store.stream(f"{p}_err_x_m", payload_type=Scalar)
-        err_y_stream = store.stream(f"{p}_err_y_m", payload_type=Scalar)
-        err_yaw_stream = store.stream(f"{p}_err_yaw_deg", payload_type=Scalar)
-        actual_x_stream = store.stream(f"{p}_actual_x_m", payload_type=Scalar)
-        cmd_x_stream = store.stream(f"{p}_cmd_x_m", payload_type=Scalar)
-        actual_y_stream = store.stream(f"{p}_actual_y_m", payload_type=Scalar)
-        cmd_y_stream = store.stream(f"{p}_cmd_y_m", payload_type=Scalar)
-        actual_yaw_stream = store.stream(f"{p}_actual_yaw_deg", payload_type=Scalar)
-        cmd_yaw_stream = store.stream(f"{p}_cmd_yaw_deg", payload_type=Scalar)
-
-        actual_trail: list[tuple[float, float]] = []
-        for ts, x, y, yaw, cx, cy, cyaw in _derive_commanded(rec):
-            actual_trail.append((x, y))
-            actual_stream.append(
-                pose_cls(ts=ts, position=Vector3(x, y, 0.0), orientation=Quaternion.from_euler(Vector3(0.0, 0.0, yaw))),
-                ts=ts,
-            )
-            actual_path_stream.append(PathLine(list(actual_trail), color), ts=ts)
-
-            err_x_stream.append(Scalar(x - cx), ts=ts)
-            err_y_stream.append(Scalar(y - cy), ts=ts)
-            err_yaw_stream.append(Scalar(math.degrees(angle_diff(yaw, cyaw))), ts=ts)
-            actual_x_stream.append(Scalar(x), ts=ts)
-            cmd_x_stream.append(Scalar(cx), ts=ts)
-            actual_y_stream.append(Scalar(y), ts=ts)
-            cmd_y_stream.append(Scalar(cy), ts=ts)
-            actual_yaw_stream.append(Scalar(math.degrees(yaw)), ts=ts)
-            cmd_yaw_stream.append(Scalar(math.degrees(cyaw)), ts=ts)
+        _write_run(store, _safe_ident(label), rec, pose_cls, color, write_commanded=False)
 
     store.stop()  # checkpoints and closes the WAL files before this returns
 
@@ -372,56 +367,7 @@ def build_master_store(labeled_dirs: list[tuple[str, str]], out_path: str | FsPa
         for rec in load_recordings(d):
             prefix = _safe_ident(f"{label}_{rec.path}_v{rec.speed:.2f}")
             _write_run(store, prefix, rec, pose_cls, color)
-    store.stop()
-
-
-def _write_run(
-    store: SqliteStore, prefix: str, rec: RunRecording, pose_cls: type[PoseStamped], color: list[int]
-) -> None:
-    """One run's full stream set (pose/path/error/actual-vs-commanded), all
-    named "<prefix>_...". Shared by build_master_store(); build_store() and
-    build_combined_store() keep their own inline versions unchanged so
-    already-tested single/combined output never shifts under this addition."""
-    actual_stream = store.stream(f"{prefix}_actual_pose", payload_type=pose_cls)
-    cmd_stream = store.stream(f"{prefix}_commanded_pose", payload_type=CommandedPose)
-    commanded_path_stream = store.stream(f"{prefix}_commanded_path", payload_type=PathLine)
-    actual_path_stream = store.stream(f"{prefix}_actual_path", payload_type=PathLine)
-    err_x_stream = store.stream(f"{prefix}_err_x_m", payload_type=Scalar)
-    err_y_stream = store.stream(f"{prefix}_err_y_m", payload_type=Scalar)
-    err_yaw_stream = store.stream(f"{prefix}_err_yaw_deg", payload_type=Scalar)
-    actual_x_stream = store.stream(f"{prefix}_actual_x_m", payload_type=Scalar)
-    cmd_x_stream = store.stream(f"{prefix}_cmd_x_m", payload_type=Scalar)
-    actual_y_stream = store.stream(f"{prefix}_actual_y_m", payload_type=Scalar)
-    cmd_y_stream = store.stream(f"{prefix}_cmd_y_m", payload_type=Scalar)
-    actual_yaw_stream = store.stream(f"{prefix}_actual_yaw_deg", payload_type=Scalar)
-    cmd_yaw_stream = store.stream(f"{prefix}_cmd_yaw_deg", payload_type=Scalar)
-
-    commanded_path_stream.append(
-        PathLine([(p[0], p[1]) for p in rec.reference], _COMMANDED_COLOR), ts=0.0
-    )
-
-    actual_trail: list[tuple[float, float]] = []
-    for ts, x, y, yaw, cx, cy, cyaw in _derive_commanded(rec):
-        actual_trail.append((x, y))
-        actual_stream.append(
-            pose_cls(ts=ts, position=Vector3(x, y, 0.0), orientation=Quaternion.from_euler(Vector3(0.0, 0.0, yaw))),
-            ts=ts,
-        )
-        cmd_stream.append(
-            CommandedPose(ts=ts, position=Vector3(cx, cy, 0.0), orientation=Quaternion.from_euler(Vector3(0.0, 0.0, cyaw))),
-            ts=ts,
-        )
-        actual_path_stream.append(PathLine(list(actual_trail), color), ts=ts)
-
-        err_x_stream.append(Scalar(x - cx), ts=ts)
-        err_y_stream.append(Scalar(y - cy), ts=ts)
-        err_yaw_stream.append(Scalar(math.degrees(angle_diff(yaw, cyaw))), ts=ts)
-        actual_x_stream.append(Scalar(x), ts=ts)
-        cmd_x_stream.append(Scalar(cx), ts=ts)
-        actual_y_stream.append(Scalar(y), ts=ts)
-        cmd_y_stream.append(Scalar(cy), ts=ts)
-        actual_yaw_stream.append(Scalar(math.degrees(yaw)), ts=ts)
-        cmd_yaw_stream.append(Scalar(math.degrees(cyaw)), ts=ts)
+    store.stop()  # checkpoints and closes the WAL files before this returns
 
 
 def render_selected(store: SqliteStore, run_prefixes: list[str], out_path: str | FsPath) -> str:
@@ -478,6 +424,17 @@ def render_selected(store: SqliteStore, run_prefixes: list[str], out_path: str |
     return str(out_path)
 
 
+def _parse_labeled_dirs(entries: list[str]) -> list[tuple[str, str]]:
+    """Parses repeated "<dir>:<label>" CLI args, e.g. "data/benchmark/go2:Holonomic Pose Controller"."""
+    labeled_dirs = []
+    for entry in entries:
+        if ":" not in entry:
+            raise SystemExit(f"expected <dir>:<label>, got {entry!r}")
+        d, label = entry.rsplit(":", 1)
+        labeled_dirs.append((d, label))
+    return labeled_dirs
+
+
 def main_master() -> None:
     ap = argparse.ArgumentParser(
         description="Build one master memory2 store holding every (controller, path, speed) run"
@@ -486,13 +443,7 @@ def main_master() -> None:
     ap.add_argument("out", help="output .db path")
     args = ap.parse_args()
 
-    labeled_dirs = []
-    for entry in args.dirs:
-        if ":" not in entry:
-            raise SystemExit(f"expected <dir>:<label>, got {entry!r}")
-        d, label = entry.rsplit(":", 1)
-        labeled_dirs.append((d, label))
-
+    labeled_dirs = _parse_labeled_dirs(args.dirs)
     build_master_store(labeled_dirs, args.out)
     print(f"wrote {args.out}")
 
@@ -509,7 +460,7 @@ def main_view() -> None:
     ap = argparse.ArgumentParser(description="Render selected runs out of a master store into a fresh .rrd")
     ap.add_argument("store", help="path to the master .db")
     ap.add_argument("out", help="output .rrd path")
-    ap.add_argument("run_prefix", nargs="+", help="one or more run-name prefixes to include, e.g. Holonomic_Pose_Controller_circle_offset_45_v0.90")
+    ap.add_argument("run_prefix", nargs="+", help="one or more run-name prefixes to include, e.g. Holonomic_Pose_Controller_circle_offset_45_v0_90")
     args = ap.parse_args()
 
     store = SqliteStore(path=args.store, must_exist=True)
@@ -541,12 +492,7 @@ def main_batch() -> None:
     ap.add_argument("--out-dir", default="data/benchmark/rerun_replays")
     args = ap.parse_args()
 
-    labeled_dirs = []
-    for entry in args.dirs:
-        if ":" not in entry:
-            raise SystemExit(f"expected <dir>:<label>, got {entry!r}")
-        d, label = entry.rsplit(":", 1)
-        labeled_dirs.append((d, label))
+    labeled_dirs = _parse_labeled_dirs(args.dirs)
 
     out_dir = FsPath(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
