@@ -64,18 +64,19 @@ module "__main__" instead, which breaks reopening the store later.
         "data/benchmark/go2_pcontroller:Baseline P-Controller" \\
         data/benchmark/all_runs.db
 
+    # pose vs velocity controller, same path/speed, overlaid (opens the viewer)
     python -c "from dimos.control.benchmarking.mem2_replay import main_view; main_view()" \\
         data/benchmark/all_runs.db compare.rrd \\
-        "Holonomic_Pose_Controller_circle_offset_45_v0_90" \\
-        "Baseline_P_Controller_circle_offset_45_v0_90"
-    rerun compare.rrd
+        --path circle_offset_45 --speed 0.9 --hpc --hvc
 
-    # not sure of the exact prefix? list them:
-    python -c "
-from dimos.memory2.store.sqlite import SqliteStore
-store = SqliteStore(path='data/benchmark/all_runs.db', must_exist=True)
-print('\\n'.join(sorted(store.list_streams())))
-"
+    # no --hpc/--hvc/--pc given -> overlays every controller available for that path/speed
+    python -c "from dimos.control.benchmarking.mem2_replay import main_view; main_view()" \\
+        data/benchmark/all_runs.db compare.rrd --path circle_offset_45 --speed 0.9
+
+    # advanced: exact run-name prefixes (e.g. copied from main_master()'s printed listing)
+    python -c "from dimos.control.benchmarking.mem2_replay import main_view; main_view()" \\
+        data/benchmark/all_runs.db compare.rrd \\
+        --run-prefix Holonomic_Pose_Controller_circle_offset_45_v0_90 Baseline_P_Controller_circle_offset_45_v0_90
 """
 
 from __future__ import annotations
@@ -133,6 +134,16 @@ _DISPLAY_NAMES = {
     "cmd_y_m": "Commanded Y (m)",
     "actual_yaw_deg": "Actual Yaw (deg)",
     "cmd_yaw_deg": "Commanded Yaw (deg)",
+}
+
+# The 3 controllers this benchmark suite compares are a small, stable set, so
+# main_view() exposes them as short boolean flags (--hpc/--hvc/--pc) instead
+# of the full "--controller <label>" a growing, open-ended set (like path
+# names) would need.
+_CONTROLLER_LABELS = {
+    "hpc": "Holonomic Pose Controller",
+    "hvc": "Holonomic Velocity Controller",
+    "pc": "Baseline P-Controller",
 }
 
 
@@ -501,12 +512,31 @@ def main_view() -> None:
     ap = argparse.ArgumentParser(description="Render selected runs out of a master store into a fresh .rrd")
     ap.add_argument("store", help="path to the master .db")
     ap.add_argument("out", help="output .rrd path")
-    ap.add_argument("run_prefix", nargs="+", help="one or more run-name prefixes to include, e.g. Holonomic_Pose_Controller_circle_offset_45_v0_90")
+    ap.add_argument("--path", help="benchmark path name, e.g. circle_offset_45")
+    ap.add_argument("--speed", type=float, help="speed in m/s, e.g. 0.9")
+    for flag, label in _CONTROLLER_LABELS.items():
+        ap.add_argument(f"--{flag}", action="store_true", help=f"overlay {label}")
+    ap.add_argument(
+        "--run-prefix",
+        nargs="+",
+        default=None,
+        help="advanced: exact run-name prefix(es) (e.g. from main_master()'s listing), "
+        "bypasses --path/--speed/--hpc/--hvc/--pc",
+    )
     ap.add_argument("--no-gui", action="store_true", help="write the .rrd without opening the rerun viewer")
     args = ap.parse_args()
 
+    if args.run_prefix:
+        prefixes = args.run_prefix
+    else:
+        if not args.path or args.speed is None:
+            raise SystemExit("need --path and --speed (or --run-prefix for exact matches)")
+        chosen = [label for flag, label in _CONTROLLER_LABELS.items() if getattr(args, flag)]
+        labels = chosen or list(_CONTROLLER_LABELS.values())  # none picked -> overlay all
+        prefixes = [_safe_ident(f"{label}_{args.path}_v{args.speed:.2f}") for label in labels]
+
     store = SqliteStore(path=args.store, must_exist=True)
-    render_selected(store, args.run_prefix, args.out, no_gui=args.no_gui)
+    render_selected(store, prefixes, args.out, no_gui=args.no_gui)
 
 
 def main() -> None:
