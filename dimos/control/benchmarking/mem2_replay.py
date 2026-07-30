@@ -19,13 +19,18 @@ actual-vs-commanded and error as scalar time series -- all through
 render_store()'s ordinary generic-stream walk, nothing custom on the render
 side.
 
-Two modes:
+Three modes:
   - Single recording -> single store, one controller (main/build_store).
   - Batch over <dir>:<label> pairs (same convention as plot_tracking_combined.py)
     -> one combined .rrd per (path, speed), all controllers overlaid, so a
     single file answers "how does each controller compare here" instead of
     making people flip between separate per-controller files
     (main_batch/build_combined_store).
+  - Master store: every (controller, path, speed) run's streams in ONE file,
+    checked in once (main_master/build_master_store), then queried afterwards
+    for whichever run(s) you want -- one run, or several overlaid for
+    comparison -- via render_selected()/main_view, without reconverting
+    anything. This is the one to check into the repo for others to pull.
 
 Commanded pose reuses the same windowed nearest-point search already trusted
 in plot_tracking_combined.py (loop paths are ambiguous under a global search).
@@ -51,6 +56,26 @@ module "__main__" instead, which breaks reopening the store later.
         "data/benchmark/go2_pcontroller:Baseline P-Controller" \\
         --out-dir data/benchmark/rerun_replays
     rerun data/benchmark/rerun_replays/*.rrd
+
+    # master store: everything in one file, query afterwards
+    python -c "from dimos.control.benchmarking.mem2_replay import main_master; main_master()" \\
+        "data/benchmark/go2_mustafa_final:Holonomic Pose Controller" \\
+        "data/benchmark/go2_dan_final:Holonomic Velocity Controller" \\
+        "data/benchmark/go2_pcontroller:Baseline P-Controller" \\
+        data/benchmark/all_runs.db
+
+    python -c "from dimos.control.benchmarking.mem2_replay import main_view; main_view()" \\
+        data/benchmark/all_runs.db compare.rrd \\
+        "Holonomic_Pose_Controller_circle_offset_45_v0_90" \\
+        "Baseline_P_Controller_circle_offset_45_v0_90"
+    rerun compare.rrd
+
+    # not sure of the exact prefix? list them:
+    python -c "
+from dimos.memory2.store.sqlite import SqliteStore
+store = SqliteStore(path='data/benchmark/all_runs.db', must_exist=True)
+print('\\n'.join(sorted(store.list_streams())))
+"
 """
 
 from __future__ import annotations
@@ -329,6 +354,166 @@ def build_combined_store(labeled_recs: list[tuple[str, RunRecording]], out_path:
             cmd_yaw_stream.append(Scalar(math.degrees(cyaw)), ts=ts)
 
     store.stop()  # checkpoints and closes the WAL files before this returns
+
+
+def build_master_store(labeled_dirs: list[tuple[str, str]], out_path: str | FsPath) -> None:
+    """Every (controller, path, speed) run's streams in one store, each under
+    its own "<label>_<path>_v<speed>_" prefix -- one file to check in and
+    share, queried afterwards with render_selected() for whichever run(s) you
+    actually want to look at, without reconverting anything. A controller
+    keeps the same color across every run it appears in (assigned by its
+    position in labeled_dirs, same convention as build_combined_store)."""
+    from dimos.control.benchmarking.score import load_recordings
+
+    store = SqliteStore(path=str(out_path))
+    for label_idx, (d, label) in enumerate(labeled_dirs):
+        pose_cls = _ACTUAL_POSE_CLASSES[label_idx % len(_ACTUAL_POSE_CLASSES)]
+        color = _PALETTE[label_idx % len(_PALETTE)]
+        for rec in load_recordings(d):
+            prefix = _safe_ident(f"{label}_{rec.path}_v{rec.speed:.2f}")
+            _write_run(store, prefix, rec, pose_cls, color)
+    store.stop()
+
+
+def _write_run(
+    store: SqliteStore, prefix: str, rec: RunRecording, pose_cls: type[PoseStamped], color: list[int]
+) -> None:
+    """One run's full stream set (pose/path/error/actual-vs-commanded), all
+    named "<prefix>_...". Shared by build_master_store(); build_store() and
+    build_combined_store() keep their own inline versions unchanged so
+    already-tested single/combined output never shifts under this addition."""
+    actual_stream = store.stream(f"{prefix}_actual_pose", payload_type=pose_cls)
+    cmd_stream = store.stream(f"{prefix}_commanded_pose", payload_type=CommandedPose)
+    commanded_path_stream = store.stream(f"{prefix}_commanded_path", payload_type=PathLine)
+    actual_path_stream = store.stream(f"{prefix}_actual_path", payload_type=PathLine)
+    err_x_stream = store.stream(f"{prefix}_err_x_m", payload_type=Scalar)
+    err_y_stream = store.stream(f"{prefix}_err_y_m", payload_type=Scalar)
+    err_yaw_stream = store.stream(f"{prefix}_err_yaw_deg", payload_type=Scalar)
+    actual_x_stream = store.stream(f"{prefix}_actual_x_m", payload_type=Scalar)
+    cmd_x_stream = store.stream(f"{prefix}_cmd_x_m", payload_type=Scalar)
+    actual_y_stream = store.stream(f"{prefix}_actual_y_m", payload_type=Scalar)
+    cmd_y_stream = store.stream(f"{prefix}_cmd_y_m", payload_type=Scalar)
+    actual_yaw_stream = store.stream(f"{prefix}_actual_yaw_deg", payload_type=Scalar)
+    cmd_yaw_stream = store.stream(f"{prefix}_cmd_yaw_deg", payload_type=Scalar)
+
+    commanded_path_stream.append(
+        PathLine([(p[0], p[1]) for p in rec.reference], _COMMANDED_COLOR), ts=0.0
+    )
+
+    actual_trail: list[tuple[float, float]] = []
+    for ts, x, y, yaw, cx, cy, cyaw in _derive_commanded(rec):
+        actual_trail.append((x, y))
+        actual_stream.append(
+            pose_cls(ts=ts, position=Vector3(x, y, 0.0), orientation=Quaternion.from_euler(Vector3(0.0, 0.0, yaw))),
+            ts=ts,
+        )
+        cmd_stream.append(
+            CommandedPose(ts=ts, position=Vector3(cx, cy, 0.0), orientation=Quaternion.from_euler(Vector3(0.0, 0.0, cyaw))),
+            ts=ts,
+        )
+        actual_path_stream.append(PathLine(list(actual_trail), color), ts=ts)
+
+        err_x_stream.append(Scalar(x - cx), ts=ts)
+        err_y_stream.append(Scalar(y - cy), ts=ts)
+        err_yaw_stream.append(Scalar(math.degrees(angle_diff(yaw, cyaw))), ts=ts)
+        actual_x_stream.append(Scalar(x), ts=ts)
+        cmd_x_stream.append(Scalar(cx), ts=ts)
+        actual_y_stream.append(Scalar(y), ts=ts)
+        cmd_y_stream.append(Scalar(cy), ts=ts)
+        actual_yaw_stream.append(Scalar(math.degrees(yaw)), ts=ts)
+        cmd_yaw_stream.append(Scalar(math.degrees(cyaw)), ts=ts)
+
+
+def render_selected(store: SqliteStore, run_prefixes: list[str], out_path: str | FsPath) -> str:
+    """Render only the streams belonging to the given run prefixes into a
+    fresh .rrd -- everything else in a (possibly much bigger) master store is
+    left out. Same per-observation walk as memory2's own render_store(), just
+    filtered to a chosen subset; that filter is the one thing the existing,
+    unmodified core tool doesn't support."""
+    import rerun as rr
+
+    from dimos.memory2.utils.progress import progress
+    from dimos.visualization.rerun.init import rerun_init
+
+    wanted = [name for name in store.list_streams() if any(name.startswith(p) for p in run_prefixes)]
+    if not wanted:
+        raise SystemExit(f"no streams matched any of {run_prefixes!r}")
+
+    renderable = []
+    t0: float | None = None
+    for name in wanted:
+        stream = store.streams[name]
+        try:
+            first = stream.first()
+        except LookupError:
+            continue
+        if not hasattr(first.data, "to_rerun"):
+            print(f"  skip {name}: {type(first.data).__name__} has no to_rerun()")
+            continue
+        renderable.append((name, stream))
+        t0 = first.ts if t0 is None else min(t0, first.ts)
+
+    if t0 is None:
+        raise SystemExit("nothing renderable in the selected runs")
+
+    rerun_init("dimos benchmark replay")
+    rr.save(str(out_path))
+    for name, stream in renderable:
+        with progress(stream.count(), label=name) as report:
+            for obs in stream:
+                if obs.data is None:
+                    report(obs)
+                    continue
+                rr.set_time("time", duration=obs.ts - t0)
+                data = obs.data.to_rerun()
+                if isinstance(data, list):
+                    for sub, arch in data:
+                        rr.log(f"{name}/{sub}", arch)
+                else:
+                    rr.log(name, data)
+                report(obs)
+
+    rr.rerun_shutdown()
+    print(f"wrote {out_path}")
+    return str(out_path)
+
+
+def main_master() -> None:
+    ap = argparse.ArgumentParser(
+        description="Build one master memory2 store holding every (controller, path, speed) run"
+    )
+    ap.add_argument("dirs", nargs="+", help="one or more <recordings_dir>:<label> pairs")
+    ap.add_argument("out", help="output .db path")
+    args = ap.parse_args()
+
+    labeled_dirs = []
+    for entry in args.dirs:
+        if ":" not in entry:
+            raise SystemExit(f"expected <dir>:<label>, got {entry!r}")
+        d, label = entry.rsplit(":", 1)
+        labeled_dirs.append((d, label))
+
+    build_master_store(labeled_dirs, args.out)
+    print(f"wrote {args.out}")
+
+    store = SqliteStore(path=args.out, must_exist=True)
+    run_prefixes = sorted(
+        name[: -len("_actual_pose")] for name in store.list_streams() if name.endswith("_actual_pose")
+    )
+    print(f"\n{len(run_prefixes)} run(s) available -- pass any of these to main_view():")
+    for p in run_prefixes:
+        print(f"  {p}")
+
+
+def main_view() -> None:
+    ap = argparse.ArgumentParser(description="Render selected runs out of a master store into a fresh .rrd")
+    ap.add_argument("store", help="path to the master .db")
+    ap.add_argument("out", help="output .rrd path")
+    ap.add_argument("run_prefix", nargs="+", help="one or more run-name prefixes to include, e.g. Holonomic_Pose_Controller_circle_offset_45_v0.90")
+    args = ap.parse_args()
+
+    store = SqliteStore(path=args.store, must_exist=True)
+    render_selected(store, args.run_prefix, args.out)
 
 
 def main() -> None:
