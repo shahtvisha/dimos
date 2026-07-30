@@ -115,6 +115,26 @@ _PALETTE = [
     [204, 121, 167],  # purple
 ]
 
+# Short, human-readable labels for the stream-name suffixes _write_run()
+# writes (see _stream_name()) -- used only by render_selected() to keep
+# per-run panel titles from being the entire "<label>_<path>_v<speed>_..."
+# prefix; the underlying stream/identifier names are unaffected.
+_DISPLAY_NAMES = {
+    "actual_pose": "Actual Pose",
+    "commanded_pose": "Commanded Pose",
+    "commanded_path": "Reference Path",
+    "actual_path": "Actual Path",
+    "err_x_m": "Error X (m)",
+    "err_y_m": "Error Y (m)",
+    "err_yaw_deg": "Error Yaw (deg)",
+    "actual_x_m": "Actual X (m)",
+    "cmd_x_m": "Commanded X (m)",
+    "actual_y_m": "Actual Y (m)",
+    "cmd_y_m": "Commanded Y (m)",
+    "actual_yaw_deg": "Actual Yaw (deg)",
+    "cmd_yaw_deg": "Commanded Yaw (deg)",
+}
+
 
 class CommandedPose(PoseStamped):
     """PoseStamped whose to_rerun() is a visible arrow, not a bare transform."""
@@ -390,6 +410,15 @@ def render_selected(
     if not wanted:
         raise SystemExit(f"no streams matched any of {run_prefixes!r}")
 
+    def entity_path(name: str) -> str:
+        # nest "<prefix>_<suffix>" as "<prefix>/<short label>" so a run's
+        # streams group under one collapsible row instead of each panel
+        # showing the entire (often long) prefix as its title.
+        prefix = max((p for p in run_prefixes if name.startswith(p)), key=len)
+        suffix = name[len(prefix) :].lstrip("_")
+        label = rr.escape_entity_path_part(_DISPLAY_NAMES.get(suffix, suffix))
+        return f"{prefix}/{label}"
+
     renderable = []
     t0: float | None = None
     for name in wanted:
@@ -401,7 +430,7 @@ def render_selected(
         if not hasattr(first.data, "to_rerun"):
             print(f"  skip {name}: {type(first.data).__name__} has no to_rerun()")
             continue
-        renderable.append((name, stream))
+        renderable.append((entity_path(name), stream))
         t0 = first.ts if t0 is None else min(t0, first.ts)
 
     if t0 is None:
@@ -409,8 +438,8 @@ def render_selected(
 
     rerun_init("dimos benchmark replay")
     rr.save(str(out_path))
-    for name, stream in renderable:
-        with progress(stream.count(), label=name) as report:
+    for path, stream in renderable:
+        with progress(stream.count(), label=path) as report:
             for obs in stream:
                 if obs.data is None:
                     report(obs)
@@ -419,9 +448,9 @@ def render_selected(
                 data = obs.data.to_rerun()
                 if isinstance(data, list):
                     for sub, arch in data:
-                        rr.log(f"{name}/{sub}", arch)
+                        rr.log(f"{path}/{sub}", arch)
                 else:
-                    rr.log(name, data)
+                    rr.log(path, data)
                 report(obs)
 
     rr.rerun_shutdown()  # flush + close the .rrd before opening it
