@@ -370,12 +370,17 @@ def build_master_store(labeled_dirs: list[tuple[str, str]], out_path: str | FsPa
     store.stop()  # checkpoints and closes the WAL files before this returns
 
 
-def render_selected(store: SqliteStore, run_prefixes: list[str], out_path: str | FsPath) -> str:
+def render_selected(
+    store: SqliteStore, run_prefixes: list[str], out_path: str | FsPath, *, no_gui: bool = False
+) -> str:
     """Render only the streams belonging to the given run prefixes into a
     fresh .rrd -- everything else in a (possibly much bigger) master store is
     left out. Same per-observation walk as memory2's own render_store(), just
     filtered to a chosen subset; that filter is the one thing the existing,
     unmodified core tool doesn't support."""
+    import shutil
+    import subprocess
+
     import rerun as rr
 
     from dimos.memory2.utils.progress import progress
@@ -419,8 +424,15 @@ def render_selected(store: SqliteStore, run_prefixes: list[str], out_path: str |
                     rr.log(name, data)
                 report(obs)
 
-    rr.rerun_shutdown()
+    rr.rerun_shutdown()  # flush + close the .rrd before opening it
     print(f"wrote {out_path}")
+    if not no_gui:
+        exe = shutil.which("rerun")
+        if exe:
+            subprocess.Popen([exe, str(out_path)])
+            print(f"  opening {out_path} in rerun")
+        else:
+            print(f"  rerun viewer not found on PATH; open manually:\n    rerun {out_path}")
     return str(out_path)
 
 
@@ -461,10 +473,11 @@ def main_view() -> None:
     ap.add_argument("store", help="path to the master .db")
     ap.add_argument("out", help="output .rrd path")
     ap.add_argument("run_prefix", nargs="+", help="one or more run-name prefixes to include, e.g. Holonomic_Pose_Controller_circle_offset_45_v0_90")
+    ap.add_argument("--no-gui", action="store_true", help="write the .rrd without opening the rerun viewer")
     args = ap.parse_args()
 
     store = SqliteStore(path=args.store, must_exist=True)
-    render_selected(store, args.run_prefix, args.out)
+    render_selected(store, args.run_prefix, args.out, no_gui=args.no_gui)
 
 
 def main() -> None:
