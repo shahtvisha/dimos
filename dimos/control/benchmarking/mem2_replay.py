@@ -102,6 +102,7 @@ from dimos.utils.trigonometry import angle_diff
 
 if TYPE_CHECKING:
     from rerun._baseclasses import Archetype
+    from rerun.blueprint import Blueprint
 
 _ARROW_LEN = 0.3
 _COMMANDED_COLOR = [0, 0, 0]  # black
@@ -170,6 +171,44 @@ def _controller_style(label: str, fallback_idx: int) -> tuple[type[PoseStamped],
         idx = fallback_idx
         color = _PALETTE[fallback_idx % len(_PALETTE)]
     return _ACTUAL_POSE_CLASSES[idx % len(_ACTUAL_POSE_CLASSES)], color
+
+
+# The scalar suffixes _write_run() writes, in display order -- used to lay
+# out one TimeSeriesView per metric in _build_blueprint().
+_METRIC_SUFFIXES = [
+    "err_x_m",
+    "err_y_m",
+    "err_yaw_deg",
+    "actual_x_m",
+    "cmd_x_m",
+    "actual_y_m",
+    "cmd_y_m",
+    "actual_yaw_deg",
+    "cmd_yaw_deg",
+]
+
+
+def _build_blueprint() -> Blueprint:
+    """One Spatial3D view (every selected run's pose/path, any controller)
+    plus one TimeSeriesView per metric that pulls that metric from every
+    selected run via a wildcard content query -- e.g. "Error X (m)" shows
+    every controller's curve overlaid in one panel. Sent explicitly rather
+    than relying on rerun's default auto-layout, which groups entities by
+    shared parent and so does NOT combine the same metric living under two
+    different runs' prefixes into one panel on its own."""
+    import rerun.blueprint as rrb
+
+    metric_views = [
+        rrb.TimeSeriesView(name=_DISPLAY_NAMES[suffix], contents=[f"/**/{suffix}"])
+        for suffix in _METRIC_SUFFIXES
+    ]
+    return rrb.Blueprint(
+        rrb.Vertical(
+            rrb.Spatial3DView(name="3D Replay", contents=["/**"]),
+            rrb.Grid(*metric_views, grid_columns=3),
+            row_shares=[2, 3],
+        ),
+    )
 
 
 class CommandedPose(PoseStamped):
@@ -443,15 +482,19 @@ def render_selected(
     wanted = [name for name in store.list_streams() if any(name.startswith(p) for p in run_prefixes)]
     if not wanted:
         raise SystemExit(f"no streams matched any of {run_prefixes!r}")
+    for p in run_prefixes:
+        if not any(name.startswith(p) for name in wanted):
+            print(f"  warning: no streams found for {p!r} -- that run isn't in this store, it won't show up")
 
     def entity_path(name: str) -> str:
-        # nest "<prefix>_<suffix>" as "<prefix>/<short label>" so a run's
-        # streams group under one collapsible row instead of each panel
-        # showing the entire (often long) prefix as its title.
+        # nest "<prefix>_<suffix>" as "<prefix>/<suffix>" so a run's streams
+        # group under one collapsible row in the entity tree; the blueprint
+        # (_build_blueprint()) is what actually gives panels their short,
+        # human-readable titles and groups same-metric entities from
+        # different runs into one overlaid view.
         prefix = max((p for p in run_prefixes if name.startswith(p)), key=len)
         suffix = name[len(prefix) :].lstrip("_")
-        label = rr.escape_entity_path_part(_DISPLAY_NAMES.get(suffix, suffix))
-        return f"{prefix}/{label}"
+        return f"{prefix}/{suffix}"
 
     renderable = []
     t0: float | None = None
@@ -472,6 +515,7 @@ def render_selected(
 
     rerun_init("dimos benchmark replay")
     rr.save(str(out_path))
+    rr.send_blueprint(_build_blueprint(), make_active=True, make_default=True)
     for path, stream in renderable:
         with progress(stream.count(), label=path) as report:
             for obs in stream:
