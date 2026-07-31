@@ -86,7 +86,7 @@ import json
 import math
 import re
 from pathlib import Path as FsPath
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -173,6 +173,18 @@ def _controller_style(label: str, fallback_idx: int) -> tuple[type[PoseStamped],
     return _ACTUAL_POSE_CLASSES[idx % len(_ACTUAL_POSE_CLASSES)], color
 
 
+def _controller_for_prefix(prefix: str) -> tuple[str, list[int]] | None:
+    """Recovers (label, color) for a run prefix built as
+    _safe_ident(f"{label}_{path}_v{speed:.2f}") -- lets render_selected()
+    give each plotted scalar series its controller's fixed color and a
+    short legend name (see _CONTROLLER_COLORS) instead of rerun's default
+    fallback (the full entity path), which is what was swamping the legend."""
+    for label, color in _CONTROLLER_COLORS.items():
+        if prefix.startswith(_safe_ident(label) + "_"):
+            return label, color
+    return None
+
+
 # The scalar suffixes _write_run() writes, in display order -- used to lay
 # out one TimeSeriesView per metric in _build_blueprint().
 _METRIC_SUFFIXES = [
@@ -209,6 +221,11 @@ def _build_blueprint(run_prefixes: list[str]) -> Blueprint:
         rrb.TimeSeriesView(
             name=_DISPLAY_NAMES[suffix],
             contents=[f"{prefix}/{suffix}" for prefix in run_prefixes],
+            # pin to a small fixed corner -- without this, and without a
+            # short per-series name (see render_selected()'s use of
+            # rr.SeriesLines), the legend defaults to sizing itself off the
+            # full entity path text and can swallow most of the panel.
+            plot_legend=rrb.PlotLegend(corner=rrb.Corner2D.RightTop),
         )
         for suffix in _METRIC_SUFFIXES
     ]
@@ -335,29 +352,78 @@ def _safe_ident(label: str) -> str:
     return ident
 
 
-def _derive_commanded(rec: RunRecording) -> list[tuple[float, float, float, float, float, float]]:
+def _canonical_transform(reference: list[list[float]]) -> tuple[float, float, float]:
+    """(ox, oy, th): reference start position + initial heading direction --
+    identical convention to score.py's _canonicalize(), the transform the
+    rest of the benchmark suite already trusts for overlaying runs. Each run
+    is anchored wherever the robot physically stood that day
+    (shift_path_to_start_at_pose() in benchmark.py), so two controllers'
+    recordings of the "same" path sit at different absolute odom coordinates
+    -- this is what actually lines them up for a direct overlay."""
+    ox, oy = reference[0][0], reference[0][1]
+    th = 0.0
+    for px, py, _ in reference[1:]:
+        if math.hypot(px - ox, py - oy) > 1e-6:
+            th = math.atan2(py - oy, px - ox)
+            break
+    return ox, oy, th
+
+
+def _transform_xy(xy: np.ndarray, ox: float, oy: float, th: float) -> np.ndarray:
+    c, s = math.cos(-th), math.sin(-th)
+    dx, dy = xy[:, 0] - ox, xy[:, 1] - oy
+    return np.stack([dx * c - dy * s, dx * s + dy * c], axis=1)
+
+
+def _derive_commanded(
+    rec: RunRecording, *, canonicalize: bool = False
+) -> list[tuple[float, float, float, float, float, float, float]]:
     """One (ts, x, y, yaw, cmd_x, cmd_y, cmd_yaw) tuple per tick -- the shared
-    per-tick math both build_store() and build_combined_store() need."""
+    per-tick math build_store(), build_combined_store() and build_master_store()
+    all need. With canonicalize=True, both the reference and the executed
+    trajectory are rigid-transformed into the shared canonical frame (see
+    _canonical_transform()) before the nearest-point search, so multiple
+    controllers' runs of the same nominal path can be overlaid directly."""
     ref_xy = np.array([[p[0], p[1]] for p in rec.reference], dtype=np.float64)
     ref_yaw = np.unwrap(np.array([p[2] for p in rec.reference], dtype=np.float64))
+    actual_xy = np.array([[tick[1], tick[2]] for tick in rec.ticks], dtype=np.float64)
     actual_yaw = np.unwrap(np.array([tick[3] for tick in rec.ticks], dtype=np.float64))
-    t0 = rec.ticks[0][0]
 
-    out: list[tuple[float, float, float, float, float, float]] = []
+    th = 0.0
+    if canonicalize:
+        ox, oy, th = _canonical_transform(rec.reference)
+        ref_xy = _transform_xy(ref_xy, ox, oy, th)
+        actual_xy = _transform_xy(actual_xy, ox, oy, th)
+        ref_yaw = ref_yaw - th
+        actual_yaw = actual_yaw - th
+
+    t0 = rec.ticks[0][0]
+    out: list[tuple[float, float, float, float, float, float, float]] = []
     last_idx: int | None = None
     for i, tick in enumerate(rec.ticks):
-        t, x, y = tick[0], tick[1], tick[2]
+        t = tick[0]
+        x, y = actual_xy[i]
         yaw = actual_yaw[i]
         ts = t - t0
 
-        pt = np.array([x, y])
-        seg_idx, _dist, t_along = _windowed_nearest_segment(pt, ref_xy, last_idx)
+        seg_idx, _dist, t_along = _windowed_nearest_segment(actual_xy[i], ref_xy, last_idx)
         last_idx = seg_idx
         foot = ref_xy[seg_idx] + t_along * (ref_xy[seg_idx + 1] - ref_xy[seg_idx])
         cmd_yaw = _reference_yaw(ref_yaw, seg_idx, t_along)
 
-        out.append((ts, x, y, float(yaw), float(foot[0]), float(foot[1]), float(cmd_yaw)))
+        out.append((ts, float(x), float(y), float(yaw), float(foot[0]), float(foot[1]), float(cmd_yaw)))
     return out
+
+
+def _canonical_reference_xy(rec: RunRecording, *, canonicalize: bool) -> list[tuple[float, float]]:
+    """The reference path's (x, y) points, transformed the same way
+    _derive_commanded() transforms this run's executed trajectory -- so the
+    logged commanded_path line matches the actual/error streams' frame."""
+    if not canonicalize:
+        return [(p[0], p[1]) for p in rec.reference]
+    ox, oy, th = _canonical_transform(rec.reference)
+    ref_xy = np.array([[p[0], p[1]] for p in rec.reference], dtype=np.float64)
+    return [(x, y) for x, y in _transform_xy(ref_xy, ox, oy, th)]
 
 
 def _stream_name(prefix: str, suffix: str) -> str:
@@ -375,13 +441,20 @@ def _write_run(
     color: list[int],
     *,
     write_commanded: bool = True,
+    canonicalize: bool = False,
 ) -> None:
     """Writes one run's full stream set (actual pose, growing path trail,
     error and actual-vs-commanded scalars) under "<prefix>_...". The
     single-recording and master-store modes each want their own commanded
     arrow + reference path (write_commanded=True, the default); the
     combined-overlay mode shares one reference path across controllers
-    instead, so it draws that itself and passes write_commanded=False."""
+    instead, so it draws that itself and passes write_commanded=False.
+
+    canonicalize=True rigid-transforms this run into the shared canonical
+    frame (see _canonical_transform()) before writing anything -- needed
+    whenever multiple controllers' runs of the same nominal path will be
+    overlaid, since each is otherwise anchored wherever the robot physically
+    stood that day and would sit at different absolute coordinates."""
     actual_stream = store.stream(_stream_name(prefix, "actual_pose"), payload_type=pose_cls)
     actual_path_stream = store.stream(_stream_name(prefix, "actual_path"), payload_type=PathLine)
     err_x_stream = store.stream(_stream_name(prefix, "err_x_m"), payload_type=Scalar)
@@ -397,11 +470,11 @@ def _write_run(
     if write_commanded:
         cmd_stream = store.stream(_stream_name(prefix, "commanded_pose"), payload_type=CommandedPose)
         store.stream(_stream_name(prefix, "commanded_path"), payload_type=PathLine).append(
-            PathLine([(p[0], p[1]) for p in rec.reference], _COMMANDED_COLOR), ts=0.0
+            PathLine(_canonical_reference_xy(rec, canonicalize=canonicalize), _COMMANDED_COLOR), ts=0.0
         )
 
     actual_trail: list[tuple[float, float]] = []
-    for ts, x, y, yaw, cx, cy, cyaw in _derive_commanded(rec):
+    for ts, x, y, yaw, cx, cy, cyaw in _derive_commanded(rec, canonicalize=canonicalize):
         actual_trail.append((x, y))
         actual_stream.append(
             pose_cls(ts=ts, position=Vector3(x, y, 0.0), orientation=Quaternion.from_euler(Vector3(0.0, 0.0, yaw))),
@@ -426,7 +499,12 @@ def _write_run(
 
 
 def build_store(rec: RunRecording, out_path: str | FsPath) -> None:
-    """Single recording, single controller (orange actual vs. black commanded)."""
+    """Single recording, single controller (orange actual vs. black commanded).
+
+    Deliberately NOT canonicalized: a lone recording should sit in the real
+    odom frame it was recorded in. Canonicalizing only matters once there's
+    a second run to line it up against (see build_combined_store(),
+    build_master_store())."""
     store = SqliteStore(path=str(out_path))
     _write_run(store, "", rec, ActualPose, _PALETTE[1])
     store.stop()  # checkpoints and closes the WAL files before this returns
@@ -436,12 +514,16 @@ def build_combined_store(labeled_recs: list[tuple[str, RunRecording]], out_path:
     """Multiple controllers, same (path, speed), overlaid in one store: one
     shared static reference path drawn once (not per controller -- overlapping
     identical black arrows would add nothing), plus each controller's colored
-    actual pose/path/scalar streams under a "<label>_" prefix."""
+    actual pose/path/scalar streams under a "<label>_" prefix.
+
+    Canonicalized (see _canonical_transform()): each run is anchored wherever
+    the robot physically stood that day, so without this the "same" nominal
+    path from two controllers would sit at different absolute coordinates --
+    two squares in different places instead of one overlaid comparison."""
     store = SqliteStore(path=str(out_path))
 
-    ref = labeled_recs[0][1].reference
     store.stream("commanded_path", payload_type=PathLine).append(
-        PathLine([(p[0], p[1]) for p in ref], _COMMANDED_COLOR), ts=0.0
+        PathLine(_canonical_reference_xy(labeled_recs[0][1], canonicalize=True), _COMMANDED_COLOR), ts=0.0
     )
 
     for i, (label, rec) in enumerate(labeled_recs):
@@ -450,7 +532,7 @@ def build_combined_store(labeled_recs: list[tuple[str, RunRecording]], out_path:
         # slashes -- so a human label like "Holonomic Pose Controller" is
         # sanitized here; the entity tree in rerun is flat, not nested, as a
         # result, but everything still renders correctly.
-        _write_run(store, _safe_ident(label), rec, pose_cls, color, write_commanded=False)
+        _write_run(store, _safe_ident(label), rec, pose_cls, color, write_commanded=False, canonicalize=True)
 
     store.stop()  # checkpoints and closes the WAL files before this returns
 
@@ -461,7 +543,12 @@ def build_master_store(labeled_dirs: list[tuple[str, str]], out_path: str | FsPa
     share, queried afterwards with render_selected() for whichever run(s) you
     actually want to look at, without reconverting anything. A controller
     keeps the same color everywhere it appears (fixed by identity, see
-    _CONTROLLER_COLORS)."""
+    _CONTROLLER_COLORS).
+
+    Canonicalized for the same reason as build_combined_store(): this store
+    exists specifically to overlay different controllers' runs of the same
+    path, and each run's raw odom-frame position is otherwise wherever the
+    robot happened to be anchored that day."""
     from dimos.control.benchmarking.score import load_recordings
 
     store = SqliteStore(path=str(out_path))
@@ -482,7 +569,7 @@ def build_master_store(labeled_dirs: list[tuple[str, str]], out_path: str | FsPa
                 continue
             seen.add(key)
             prefix = _safe_ident(f"{label}_{rec.path}_v{rec.speed:.2f}")
-            _write_run(store, prefix, rec, pose_cls, color)
+            _write_run(store, prefix, rec, pose_cls, color, canonicalize=True)
     store.stop()  # checkpoints and closes the WAL files before this returns
 
 
@@ -509,17 +596,12 @@ def render_selected(
         if not any(name.startswith(p) for name in wanted):
             print(f"  warning: no streams found for {p!r} -- that run isn't in this store, it won't show up")
 
-    def entity_path(name: str) -> str:
-        # nest "<prefix>_<suffix>" as "<prefix>/<suffix>" so a run's streams
-        # group under one collapsible row in the entity tree; the blueprint
-        # (_build_blueprint()) is what actually gives panels their short,
-        # human-readable titles and groups same-metric entities from
-        # different runs into one overlaid view.
-        prefix = max((p for p in run_prefixes if name.startswith(p)), key=len)
-        suffix = name[len(prefix) :].lstrip("_")
-        return f"{prefix}/{suffix}"
-
-    renderable = []
+    # (entity path, stream, series style) -- style is (label, color) for a
+    # Scalar stream belonging to one of the known controllers, else None.
+    # Without an explicit style, rerun assigns each series an arbitrary
+    # color (can collide between controllers) and falls back to the full
+    # entity path as its legend name, which is what was swamping the legend.
+    renderable: list[tuple[str, Any, tuple[str, list[int]] | None]] = []
     t0: float | None = None
     for name in wanted:
         stream = store.streams[name]
@@ -530,7 +612,15 @@ def render_selected(
         if not hasattr(first.data, "to_rerun"):
             print(f"  skip {name}: {type(first.data).__name__} has no to_rerun()")
             continue
-        renderable.append((entity_path(name), stream))
+        # nest "<prefix>_<suffix>" as "<prefix>/<suffix>" so a run's streams
+        # group under one collapsible row in the entity tree; the blueprint
+        # (_build_blueprint()) is what actually gives panels their short,
+        # human-readable titles and groups same-metric entities from
+        # different runs into one overlaid view.
+        prefix = max((p for p in run_prefixes if name.startswith(p)), key=len)
+        path = f"{prefix}/{name[len(prefix):].lstrip('_')}"
+        style = _controller_for_prefix(prefix) if isinstance(first.data, Scalar) else None
+        renderable.append((path, stream, style))
         t0 = first.ts if t0 is None else min(t0, first.ts)
 
     if t0 is None:
@@ -539,7 +629,13 @@ def render_selected(
     rerun_init("dimos benchmark replay")
     rr.save(str(out_path))
     rr.send_blueprint(_build_blueprint(run_prefixes), make_active=True, make_default=True)
-    for path, stream in renderable:
+
+    for path, _stream, style in renderable:
+        if style is not None:
+            label, color = style
+            rr.log(path, rr.SeriesLines(colors=[color], names=[label]), static=True)
+
+    for path, stream, _style in renderable:
         with progress(stream.count(), label=path) as report:
             for obs in stream:
                 if obs.data is None:
