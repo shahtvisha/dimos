@@ -114,10 +114,12 @@ def path_set() -> dict[str, NavPath]:
         "s_curve": s_curve(length=4.0, lateral_offset=1.0),
         "crank_90": crank_90(leg_length=2.0, offset_leg=1.0),
         "u_turn": u_turn(radius=1.0, leg_length=1.0),
-        "circle_large": circle(radius=3.0),
-        "snake": snake(length=6.0, amplitude=0.5, wavelength=1.5),
+        "circle_large": circle(radius=2.0),
+        "snake": snake(length=4.0, amplitude=0.4, wavelength=1.5),
         "mixed_turns": mixed_turns(),
-        "random_mixed": random_mixed_path(seed=42),
+        "random_mixed": random_mixed_path(
+            seed=42, n_segments=5, leg_range=(0.8, 1.5), angle_range=(20.0, 80.0)
+        ),
     }
 
 
