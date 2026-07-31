@@ -21,6 +21,7 @@ Every path starts at the origin facing +x in the robot frame. Each
 from __future__ import annotations
 
 import math
+import random
 
 from dimos.memory2.vis.space.elements import Point, Polyline, Text
 from dimos.memory2.vis.space.space import Space
@@ -182,6 +183,150 @@ def square(side: float = 2.0, step: float = 0.05) -> Path:
     for i in range(1, n_side + 1):
         xs.append(0.0)
         ys.append(side - i * step)
+    return _path_from_xy(xs, ys)
+
+
+def s_curve(length: float = 4.0, lateral_offset: float = 1.0, step: float = 0.05) -> Path:
+    """One smooth S-shaped lane change: y ramps from 0 to ``lateral_offset``
+    via a raised-cosine, giving a single continuous inflection -- unlike
+    :func:`slalom` (repeated oscillation) or :func:`snake` (continuous weave),
+    this is one clean side-shift and back to straight-line tracking."""
+    n = round(length / step)
+    xs = [length * i / n for i in range(n + 1)]
+    ys = [lateral_offset * 0.5 * (1.0 - math.cos(math.pi * x / length)) for x in xs]
+    return _path_from_xy(xs, ys)
+
+
+def crank_90(leg_length: float = 2.0, offset_leg: float = 1.0, step: float = 0.05) -> Path:
+    """Double-offset "crank"/moose-test maneuver: straight, sharp 90 degree
+    turn, a short offset leg, then a sharp 90 degree turn back to the
+    original heading. Unlike :func:`single_corner` (one turn, ends rotated
+    90 degrees), this ends parallel to the start, shifted laterally by
+    ``offset_leg`` -- tests recovering onto a straight heading right after a
+    turn, not just the turn itself.
+    """
+    n_leg = round(leg_length / step)
+    n_off = round(offset_leg / step)
+
+    xs: list[float] = [i * step for i in range(n_leg + 1)]
+    ys: list[float] = [0.0] * (n_leg + 1)
+    cx, cy = xs[-1], ys[-1]
+    for i in range(1, n_off + 1):  # turn left onto the offset leg
+        xs.append(cx)
+        ys.append(cy + i * step)
+    cx, cy = xs[-1], ys[-1]
+    for i in range(1, n_leg + 1):  # turn right, back to the original heading
+        xs.append(cx + i * step)
+        ys.append(cy)
+    return _path_from_xy(xs, ys)
+
+
+def u_turn(radius: float = 1.0, leg_length: float = 1.0, n_arc_points: int = 60, step: float = 0.05) -> Path:
+    """Straight approach, a 180 degree arc, straight exit heading reversed --
+    a classic U-turn. ``radius`` sets how tight the turn is."""
+    n_leg = round(leg_length / step)
+    xs: list[float] = [i * step for i in range(n_leg + 1)]
+    ys: list[float] = [0.0] * (n_leg + 1)
+
+    cx, cy = xs[-1], ys[-1] + radius  # arc center, turning left
+    for i in range(1, n_arc_points + 1):
+        theta = -math.pi / 2.0 + math.pi * i / n_arc_points
+        xs.append(cx + radius * math.cos(theta))
+        ys.append(cy + radius * math.sin(theta))
+
+    ex, ey = xs[-1], ys[-1]
+    for i in range(1, n_leg + 1):  # exit heading is now reversed (-x)
+        xs.append(ex - i * step)
+        ys.append(ey)
+    return _path_from_xy(xs, ys)
+
+
+def snake(length: float = 6.0, amplitude: float = 0.5, wavelength: float = 1.5, step: float = 0.05) -> Path:
+    """Continuous sinusoidal weave -- tighter, more frequent oscillation than
+    :func:`slalom` (which is framed around discrete cone spacing). Stresses
+    how tightly a controller cuts a continuous curve rather than how it
+    handles discrete pass-the-cone waypoints."""
+    n = round(length / step)
+    xs = [length * i / n for i in range(n + 1)]
+    ys = [amplitude * math.sin(2.0 * math.pi * x / wavelength) for x in xs]
+    return _path_from_xy(xs, ys)
+
+
+def mixed_turns(legs: list[tuple[float, float]] | None = None, step: float = 0.05) -> Path:
+    """Chain of straight legs and turns: ``legs`` is a list of
+    ``(leg_length, turn_angle_deg)`` pairs, turning by each angle (left
+    positive) at the end of each leg before the next. Default is a
+    representative combination of gentle and sharp turns in both directions.
+    """
+    if legs is None:
+        legs = [(1.5, 30.0), (1.0, -60.0), (1.5, 90.0), (1.0, -45.0), (1.5, 0.0)]
+
+    xs: list[float] = [0.0]
+    ys: list[float] = [0.0]
+    heading = 0.0
+    for leg_length, turn_deg in legs:
+        n = max(1, round(leg_length / step))
+        cx, cy = xs[-1], ys[-1]
+        cos_h, sin_h = math.cos(heading), math.sin(heading)
+        for i in range(1, n + 1):
+            d = i * step
+            xs.append(cx + d * cos_h)
+            ys.append(cy + d * sin_h)
+        heading += math.radians(turn_deg)
+    return _path_from_xy(xs, ys)
+
+
+def random_mixed_path(
+    seed: int = 42,
+    n_segments: int = 6,
+    leg_range: tuple[float, float] = (1.0, 2.5),
+    angle_range: tuple[float, float] = (20.0, 90.0),
+    sharp_fraction: float = 0.5,
+    arc_radius_range: tuple[float, float] = (0.3, 0.8),
+    step: float = 0.05,
+) -> Path:
+    """Reproducible (seeded) path mixing sharp corners and rounded arcs, and
+    both soft (small-angle) and sharp (large-angle) turns -- one fixed
+    reference course, not regenerated per run, so every controller is tested
+    against the exact same random-looking geometry.
+
+    Each segment: a straight leg of random length in ``leg_range``, then a
+    turn of random signed angle in ``angle_range``, executed either as an
+    instantaneous corner (probability ``sharp_fraction``) or as a swept arc
+    of random radius in ``arc_radius_range`` (same construction as
+    :func:`smooth_corner`'s arc, generalized to an arbitrary turn angle).
+    """
+    rng = random.Random(seed)
+    xs: list[float] = [0.0]
+    ys: list[float] = [0.0]
+    heading = 0.0
+    for _ in range(n_segments):
+        leg_length = rng.uniform(*leg_range)
+        n = max(1, round(leg_length / step))
+        cx, cy = xs[-1], ys[-1]
+        cos_h, sin_h = math.cos(heading), math.sin(heading)
+        for i in range(1, n + 1):
+            d = i * step
+            xs.append(cx + d * cos_h)
+            ys.append(cy + d * sin_h)
+
+        angle_deg = rng.uniform(*angle_range) * rng.choice((-1.0, 1.0))
+        angle_rad = math.radians(angle_deg)
+        if rng.random() < sharp_fraction:
+            heading += angle_rad  # sharp: instantaneous turn, zero radius
+        else:
+            arc_radius = rng.uniform(*arc_radius_range)
+            sign = 1.0 if angle_rad >= 0.0 else -1.0
+            cx, cy = xs[-1], ys[-1]
+            center_x = cx - sign * arc_radius * math.sin(heading)
+            center_y = cy + sign * arc_radius * math.cos(heading)
+            start_angle = math.atan2(cy - center_y, cx - center_x)
+            n_arc = max(2, round(abs(angle_rad) * arc_radius / step))
+            for i in range(1, n_arc + 1):
+                a = start_angle + sign * abs(angle_rad) * i / n_arc
+                xs.append(center_x + arc_radius * math.cos(a))
+                ys.append(center_y + arc_radius * math.sin(a))
+            heading += angle_rad
     return _path_from_xy(xs, ys)
 
 

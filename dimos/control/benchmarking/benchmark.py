@@ -55,12 +55,18 @@ from reactivex.disposable import Disposable
 from dimos.control.benchmarking.gate import GATE_QUIT, GATE_SKIP
 from dimos.control.benchmarking.paths import (
     circle,
+    crank_90,
     fullpose_path_set,
+    mixed_turns,
+    random_mixed_path,
     rounded_square,
+    s_curve,
     single_corner,
     smooth_corner,
+    snake,
     square,
     straight_line,
+    u_turn,
 )
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
@@ -89,6 +95,14 @@ def path_set() -> dict[str, NavPath]:
     Sharp corners (single_corner, square) keep the infinite-curvature 90°
     geometry; their curved counterparts (smooth_corner, rounded_square) fillet
     the vertices so a tracker can hold them at speed.
+
+    Every path here is tangent-heading (commanded yaw == direction of
+    travel) on purpose, including the newer additions below (s_curve,
+    crank_90, u_turn, circle_large, snake, mixed_turns, random_mixed) --
+    unlike fullpose_path_set()'s decoupled-heading paths, which only a
+    full-pose tracker can execute at all, these vary difficulty purely
+    through geometry (curvature, corner sharpness, turn density), so any
+    tangent-following controller can be scored on them on equal footing.
     """
     return {
         "straight_line": straight_line(),
@@ -97,6 +111,13 @@ def path_set() -> dict[str, NavPath]:
         "square": square(side=2.0),
         "rounded_square": rounded_square(side=2.0, arc_radius=0.5),
         "circle": circle(radius=1.0),
+        "s_curve": s_curve(length=4.0, lateral_offset=1.0),
+        "crank_90": crank_90(leg_length=2.0, offset_leg=1.0),
+        "u_turn": u_turn(radius=1.0, leg_length=1.0),
+        "circle_large": circle(radius=3.0),
+        "snake": snake(length=6.0, amplitude=0.5, wavelength=1.5),
+        "mixed_turns": mixed_turns(),
+        "random_mixed": random_mixed_path(seed=42),
     }
 
 
