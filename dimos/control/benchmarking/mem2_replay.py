@@ -146,6 +146,31 @@ _CONTROLLER_LABELS = {
     "pc": "Baseline P-Controller",
 }
 
+# Fixed color per known controller, so a controller is always the same color
+# regardless of what order its directory happens to be passed in -- e.g.
+# --hpc is always red, --hvc is always blue. The shared reference path stays
+# black (_COMMANDED_COLOR) either way, since it's the same for every
+# controller on a given (path, speed).
+_CONTROLLER_COLORS: dict[str, list[int]] = {
+    "Holonomic Pose Controller": [213, 0, 0],  # red
+    "Holonomic Velocity Controller": [0, 114, 178],  # blue
+    "Baseline P-Controller": [0, 158, 115],  # green
+}
+
+
+def _controller_style(label: str, fallback_idx: int) -> tuple[type[PoseStamped], list[int]]:
+    """(pose class, color) for a controller -- fixed by identity for the 3
+    known controllers above; an unrecognized label (not one of those 3)
+    falls back to cycling the shared palette by its position in the list of
+    dirs passed in, same as before this was made identity-based."""
+    if label in _CONTROLLER_COLORS:
+        idx = list(_CONTROLLER_COLORS).index(label)
+        color = _CONTROLLER_COLORS[label]
+    else:
+        idx = fallback_idx
+        color = _PALETTE[fallback_idx % len(_PALETTE)]
+    return _ACTUAL_POSE_CLASSES[idx % len(_ACTUAL_POSE_CLASSES)], color
+
 
 class CommandedPose(PoseStamped):
     """PoseStamped whose to_rerun() is a visible arrow, not a bare transform."""
@@ -371,8 +396,7 @@ def build_combined_store(labeled_recs: list[tuple[str, RunRecording]], out_path:
     )
 
     for i, (label, rec) in enumerate(labeled_recs):
-        pose_cls = _ACTUAL_POSE_CLASSES[i % len(_ACTUAL_POSE_CLASSES)]
-        color = _PALETTE[i % len(_PALETTE)]
+        pose_cls, color = _controller_style(label, i)
         # memory2 stream names must be valid SQL identifiers -- no spaces or
         # slashes -- so a human label like "Holonomic Pose Controller" is
         # sanitized here; the entity tree in rerun is flat, not nested, as a
@@ -387,14 +411,13 @@ def build_master_store(labeled_dirs: list[tuple[str, str]], out_path: str | FsPa
     its own "<label>_<path>_v<speed>_" prefix -- one file to check in and
     share, queried afterwards with render_selected() for whichever run(s) you
     actually want to look at, without reconverting anything. A controller
-    keeps the same color across every run it appears in (assigned by its
-    position in labeled_dirs, same convention as build_combined_store)."""
+    keeps the same color everywhere it appears (fixed by identity, see
+    _CONTROLLER_COLORS)."""
     from dimos.control.benchmarking.score import load_recordings
 
     store = SqliteStore(path=str(out_path))
     for label_idx, (d, label) in enumerate(labeled_dirs):
-        pose_cls = _ACTUAL_POSE_CLASSES[label_idx % len(_ACTUAL_POSE_CLASSES)]
-        color = _PALETTE[label_idx % len(_PALETTE)]
+        pose_cls, color = _controller_style(label, label_idx)
         for rec in load_recordings(d):
             prefix = _safe_ident(f"{label}_{rec.path}_v{rec.speed:.2f}")
             _write_run(store, prefix, rec, pose_cls, color)
@@ -496,6 +519,15 @@ def main_master() -> None:
     args = ap.parse_args()
 
     labeled_dirs = _parse_labeled_dirs(args.dirs)
+
+    # SqliteStore opens (not truncates) an existing file, so re-running this
+    # against the same path would append a second copy of every observation
+    # on top of whatever's already there. A rebuild always means "start
+    # fresh," so clear out any previous store (+ its WAL sidecars) first.
+    out_path = FsPath(args.out)
+    for suffix in ("", "-shm", "-wal"):
+        out_path.with_name(out_path.name + suffix).unlink(missing_ok=True)
+
     build_master_store(labeled_dirs, args.out)
     print(f"wrote {args.out}")
 
