@@ -23,6 +23,11 @@ battery, same speeds, same tolerances, only the controller differs.
     dimos run unitree-go2-path-follower-benchmark
     # afterwards, score offline:
     python -m dimos.control.benchmarking.score data/benchmark/go2
+
+Override the battery or output directory without editing this file:
+
+    PF_BATTERY=new_paths PF_OUT_DIR=data/benchmark/new_tests/pcontroller \\
+        dimos run unitree-go2-path-follower-benchmark
 """
 
 from __future__ import annotations
@@ -48,7 +53,7 @@ unitree_go2_path_follower_benchmark = (
         unitree_go2_path_follower_controller,
         Benchmarker.blueprint(
             robot="go2",
-            battery="all",
+            battery=os.environ.get("PF_BATTERY", "all"),
             gate_source="stream",
             out_dir=os.environ.get("PF_OUT_DIR"),
         ),

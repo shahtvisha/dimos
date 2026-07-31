@@ -25,6 +25,11 @@ re-launching with a different DAN_SPEED_M_S each time.
     DAN_SPEED_M_S=0.5 dimos run unitree-go2-dan-holonomic-benchmark
     # afterwards, score offline:
     python -m dimos.control.benchmarking.score data/benchmark/go2
+
+Override the battery or output directory without editing this file:
+
+    DAN_BATTERY=new_paths DAN_OUT_DIR=data/benchmark/new_tests/dan DAN_SPEED_M_S=0.5 \\
+        dimos run unitree-go2-dan-holonomic-benchmark
 """
 
 from __future__ import annotations
@@ -52,7 +57,7 @@ unitree_go2_dan_holonomic_benchmark = (
         unitree_go2_dan_holonomic_controller,
         Benchmarker.blueprint(
             robot="go2",
-            battery="all",
+            battery=os.environ.get("DAN_BATTERY", "all"),
             speeds=_speed_m_s,
             gate_source="stream",
             out_dir=os.environ.get("DAN_OUT_DIR"),

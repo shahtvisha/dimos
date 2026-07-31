@@ -25,6 +25,7 @@ import pytest
 
 from dimos.control.benchmarking.benchmark import (
     BATTERIES,
+    NEW_PATH_NAMES,
     CompletionMonitor,
     OdomRecorder,
     RunRecording,
@@ -171,7 +172,9 @@ def test_path_set_is_the_full_battery():
 
 
 def test_battery_registry_selects_fullpose_paths():
-    assert set(BATTERIES) == {"hardware", "fullpose", "all"}
+    assert set(BATTERIES) == {"hardware", "fullpose", "all", "new_paths"}
+    assert set(BATTERIES["new_paths"]()) == NEW_PATH_NAMES
+    assert NEW_PATH_NAMES <= set(path_set())  # every new path is still part of "hardware"
     fullpose = BATTERIES["fullpose"]()
     assert set(fullpose) == {
         "straight_rotate_90",

@@ -31,10 +31,16 @@ odom automatically::
     dimos run unitree-go2-holonomic-benchmark
     # afterwards, score offline (the benchmark logs the recordings dir on start):
     python -m dimos.control.benchmarking.score <recordings-dir>
+
+Override the battery or output directory without editing this file:
+
+    MUSTAFA_BATTERY=new_paths MUSTAFA_OUT_DIR=data/benchmark/new_tests/mustafa \\
+        dimos run unitree-go2-holonomic-benchmark
 """
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from dimos.control.benchmarking.benchmark import Benchmarker
@@ -62,8 +68,14 @@ unitree_go2_holonomic_benchmark = (
         unitree_go2_holonomic_controller,
         # "all" = the tangent-heading geometry (square, rounded_square, circle,
         # ...) PLUS the decoupled-yaw full-pose cases. Use K (skip) at the gate
-        # to trim a session; battery="fullpose" runs just the decoupled cases.
-        Benchmarker.blueprint(robot="go2", battery="all", gate_source="stream"),
+        # to trim a session, or MUSTAFA_BATTERY=fullpose / new_paths to run
+        # just one slice without editing this file.
+        Benchmarker.blueprint(
+            robot="go2",
+            battery=os.environ.get("MUSTAFA_BATTERY", "all"),
+            gate_source="stream",
+            out_dir=os.environ.get("MUSTAFA_OUT_DIR"),
+        ),
     )
     # Record the command the robot actually receives (/go2/cmd_vel, written by
     # the coordinator's base adapter) — NOT /cmd_vel, which only carries the

@@ -123,6 +123,14 @@ def path_set() -> dict[str, NavPath]:
     }
 
 
+# Keys added to path_set() after the original 6 -- kept as their own battery
+# ("new_paths") so a session can run just these without re-recording the
+# whole existing suite.
+NEW_PATH_NAMES = frozenset(
+    {"s_curve", "crank_90", "u_turn", "circle_large", "snake", "mixed_turns", "random_mixed"}
+)
+
+
 BATTERIES: dict[str, Any] = {
     # Tangent-heading battery for pursuit followers (RPP).
     "hardware": path_set,
@@ -132,6 +140,9 @@ BATTERIES: dict[str, Any] = {
     # (commanded yaw == tangent there), giving an apples-to-apples comparison
     # against RPP on the same paths plus the decoupled-yaw cases.
     "all": lambda: {**path_set(), **fullpose_path_set()},
+    # Just the newer additions to path_set() -- for a session that only
+    # wants to record the new geometry, not repeat the existing battery.
+    "new_paths": lambda: {k: v for k, v in path_set().items() if k in NEW_PATH_NAMES},
 }
 
 
@@ -390,7 +401,7 @@ class BenchmarkerConfig(ModuleConfig):
     """
 
     robot: str = "go2"
-    battery: Literal["hardware", "fullpose", "all"] = "hardware"
+    battery: Literal["hardware", "fullpose", "all", "new_paths"] = "hardware"
     speeds: str = "0.3,0.5,0.7,0.9,1.0"
     tolerances: str = "5,10,15"  # cm — carried through to the offline scorer
     goal_tolerance: float = 0.25  # m — arrival radius around the last pose
