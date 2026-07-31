@@ -160,6 +160,13 @@ def test_path_set_is_the_full_battery():
         "square",
         "rounded_square",
         "circle",
+        "s_curve",
+        "crank_90",
+        "u_turn",
+        "circle_large",
+        "snake",
+        "mixed_turns",
+        "random_mixed",
     }
 
 
