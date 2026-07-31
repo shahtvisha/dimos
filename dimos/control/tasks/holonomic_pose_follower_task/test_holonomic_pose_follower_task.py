@@ -139,14 +139,23 @@ def test_set_path_arms_and_preemption_aborts():
 
 def test_streamed_path_arms_on_the_first_tick_with_a_pose():
     """The card handler carries no odom, so a streamed path is latched and armed
-    on the first tick that has a pose — never dropped for arriving early."""
+    on the first tick that has a pose — never dropped for arriving early.
+
+    is_active() must already be True as soon as a path is pending (before
+    it's actually armed): the tick loop only calls compute() on active
+    tasks, and compute() is the only thing that arms a pending path via
+    start_path() — so if is_active() stayed False until arming, compute()
+    would never run and the path would never arm at all (a permanent
+    deadlock; see PR #3159)."""
     task = _task()
     task.on_path(straight_rotate(), t_now=0.0)
-    assert not task.is_active()  # latched, not armed
+    assert task.is_active()  # pending arm -- must be active, or compute() never runs
+    assert task._state == "idle"  # latched, not armed yet (no pose seen)
     task.compute(CoordinatorState(joints=JointStateSnapshot(), t_now=0.0, dt=_DT))
-    assert not task.is_active()  # still no pose available
+    assert task._state == "idle"  # still no pose available, can't arm
     task.compute(_state(0.0, 0.0, 0.0, t=_DT))
     assert task.is_active()
+    assert task._state == "tracking"  # now armed
 
 
 def test_streamed_speed_applies_before_the_path():
