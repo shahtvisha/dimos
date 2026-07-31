@@ -188,18 +188,28 @@ _METRIC_SUFFIXES = [
 ]
 
 
-def _build_blueprint() -> Blueprint:
+def _build_blueprint(run_prefixes: list[str]) -> Blueprint:
     """One Spatial3D view (every selected run's pose/path, any controller)
-    plus one TimeSeriesView per metric that pulls that metric from every
-    selected run via a wildcard content query -- e.g. "Error X (m)" shows
-    every controller's curve overlaid in one panel. Sent explicitly rather
+    plus one TimeSeriesView per metric, each explicitly listing that metric's
+    entity under every given run prefix -- e.g. "Error X (m)" shows every
+    selected controller's curve overlaid in one panel. Sent explicitly rather
     than relying on rerun's default auto-layout, which groups entities by
     shared parent and so does NOT combine the same metric living under two
-    different runs' prefixes into one panel on its own."""
+    different runs' prefixes into one panel on its own.
+
+    Content queries can't do this with a wildcard: rerun's query-expression
+    language only supports "/**" as a *suffix* (matching a whole subtree);
+    a middle wildcard like "/**/err_x_m" (any prefix, exact suffix) isn't
+    supported and silently matches nothing. Since the caller already knows
+    the small, exact set of run_prefixes being rendered, listing each one
+    explicitly sidesteps the limitation entirely."""
     import rerun.blueprint as rrb
 
     metric_views = [
-        rrb.TimeSeriesView(name=_DISPLAY_NAMES[suffix], contents=[f"/**/{suffix}"])
+        rrb.TimeSeriesView(
+            name=_DISPLAY_NAMES[suffix],
+            contents=[f"{prefix}/{suffix}" for prefix in run_prefixes],
+        )
         for suffix in _METRIC_SUFFIXES
     ]
     return rrb.Blueprint(
@@ -457,7 +467,20 @@ def build_master_store(labeled_dirs: list[tuple[str, str]], out_path: str | FsPa
     store = SqliteStore(path=str(out_path))
     for label_idx, (d, label) in enumerate(labeled_dirs):
         pose_cls, color = _controller_style(label, label_idx)
+        seen: set[tuple[str, float]] = set()
         for rec in load_recordings(d):
+            # a benchmark dir can hold repeat runs of the same (path, speed)
+            # (e.g. go2_square_v0.90_001.json and go2_square_v0.90_018.json)
+            # -- since the prefix doesn't encode the file's run id, writing
+            # more than one would silently append a second copy of every
+            # observation into the same stream (e.g. two overlapping
+            # reference-path squares). Keep only the first (sorted-filename
+            # order, from load_recordings()), skip the rest.
+            key = (rec.path, round(rec.speed, 2))
+            if key in seen:
+                print(f"  skip repeat recording: {label} {rec.path} @ {rec.speed:g} m/s already has a run")
+                continue
+            seen.add(key)
             prefix = _safe_ident(f"{label}_{rec.path}_v{rec.speed:.2f}")
             _write_run(store, prefix, rec, pose_cls, color)
     store.stop()  # checkpoints and closes the WAL files before this returns
@@ -515,7 +538,7 @@ def render_selected(
 
     rerun_init("dimos benchmark replay")
     rr.save(str(out_path))
-    rr.send_blueprint(_build_blueprint(), make_active=True, make_default=True)
+    rr.send_blueprint(_build_blueprint(run_prefixes), make_active=True, make_default=True)
     for path, stream in renderable:
         with progress(stream.count(), label=path) as report:
             for obs in stream:
