@@ -259,7 +259,7 @@ def mixed_turns(legs: list[tuple[float, float]] | None = None, step: float = 0.0
     representative combination of gentle and sharp turns in both directions.
     """
     if legs is None:
-        legs = [(1.5, 30.0), (1.0, -60.0), (1.5, 90.0), (1.0, -45.0), (1.5, 0.0)]
+        legs = [(0.9, 30.0), (0.6, -60.0), (0.9, 90.0), (0.6, -45.0), (0.9, 0.0)]
 
     xs: list[float] = [0.0]
     ys: list[float] = [0.0]
