@@ -559,10 +559,14 @@ def render_selected(
     if not no_gui:
         exe = shutil.which("rerun")
         if exe:
-            subprocess.Popen([exe, str(out_path)])
-            print(f"  opening {out_path} in rerun")
+            # --new: always start a fresh viewer instead of streaming into
+            # whatever's already running on the default port. Without this,
+            # an old viewer session can keep an earlier, now-stale blueprint
+            # active and never pick up the one just sent above.
+            subprocess.Popen([exe, "--new", str(out_path)])
+            print(f"  opening {out_path} in a new rerun window")
         else:
-            print(f"  rerun viewer not found on PATH; open manually:\n    rerun {out_path}")
+            print(f"  rerun viewer not found on PATH; open manually:\n    rerun --new {out_path}")
     return str(out_path)
 
 
