@@ -60,6 +60,19 @@ def _start_aligned(task: PathFollowerTask, path) -> None:
     assert task.start_path(path, odom)
 
 
+# streamed path arming
+
+
+def test_streamed_path_arms_on_the_first_tick_with_a_pose():
+    task = _task()
+    task.on_path(straight_line(length=2.0), t_now=0.0)
+    assert task.is_active()  # pending arm, must be active so compute() runs
+    task.compute(CoordinatorState(joints=JointStateSnapshot(), t_now=0.0, dt=0.1))
+    assert task._state == "idle"  # still no pose available
+    task.compute(_state(0.0, 0.0, 0.0, t=0.1))
+    assert task.is_active()
+
+
 # adaptive lookahead
 
 

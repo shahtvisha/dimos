@@ -208,7 +208,7 @@ class PathFollowerTask(BaseControlTask):
         )
 
     def is_active(self) -> bool:
-        return self._state in ("initial_rotation", "path_following", "final_rotation")
+        return self._state in ("initial_rotation", "path_following", "final_rotation") or self._pending_path is not None
 
     def compute(self, state: CoordinatorState) -> JointCommandOutput | None:
         if self._pending_path is not None:
