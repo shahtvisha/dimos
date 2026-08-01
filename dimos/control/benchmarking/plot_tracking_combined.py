@@ -133,8 +133,14 @@ def _series(rec: RunRecording) -> dict[str, np.ndarray]:
     actual_xc, actual_yc, actual_yawc = _to_canonical(actual_x, actual_y, actual_yaw, ox, oy, th)
     cmd_xc, cmd_yc, cmd_yawc = _to_canonical(cmd_x, cmd_y, cmd_yaw, ox, oy, th)
 
+    ref_x = np.array([p[0] for p in rec.reference], dtype=np.float64)
+    ref_y = np.array([p[1] for p in rec.reference], dtype=np.float64)
+    ref_xc, ref_yc, _ = _to_canonical(ref_x, ref_y, np.zeros_like(ref_x), ox, oy, th)
+
     return {
         "t": t,
+        "ref_x": ref_xc,
+        "ref_y": ref_yc,
         "actual_x": actual_xc,
         "cmd_x": cmd_xc,
         "err_x": actual_x - cmd_x,
@@ -206,6 +212,26 @@ def _heading_kind(path_name: str) -> str:
     return "decoupled heading" if path_name in FULLPOSE_PATHS else "tangent heading"
 
 
+def _draw_path(ax, labeled_series: list[tuple[str, dict[str, np.ndarray]]]) -> None:
+    """2D XY shape: reference path once (black), each controller's actual
+    trajectory overlaid in its own color -- the piece plot_combined() was
+    missing (it only had commanded-vs-actual time series, not the path
+    shape itself)."""
+    ref = labeled_series[0][1]
+    ax.plot(ref["ref_x"], ref["ref_y"], color="black", lw=2.0, label="reference", zorder=10)
+    for i, (label, s) in enumerate(labeled_series):
+        color = _COLORS.get(i, "gray")
+        ax.plot(s["actual_x"], s["actual_y"], color=color, lw=1.3, label=label, alpha=0.9)
+        ax.plot(s["actual_x"][-1], s["actual_y"][-1], "o", ms=5, color=color, zorder=11)
+    ax.plot(ref["ref_x"][0], ref["ref_y"][0], "s", ms=6, color="black", zorder=12)
+    ax.set_xlabel("x (m)")
+    ax.set_ylabel("y (m)")
+    ax.set_title("path")
+    ax.set_aspect("equal", adjustable="datalim")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8)
+
+
 def plot_combined(
     path_name: str,
     labeled_series: list[tuple[str, dict[str, np.ndarray]]],
@@ -217,16 +243,23 @@ def plot_combined(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(3, 2, figsize=(14, 11), sharex=False)
+    fig = plt.figure(figsize=(14, 15))
+    gs = fig.add_gridspec(4, 2, height_ratios=[1.4, 1, 1, 1])
+
+    path_ax = fig.add_subplot(gs[0, :])
+    _draw_path(path_ax, labeled_series)
+
     for row, (title, ylabel, actual_key, cmd_key, err_key, err_ylabel, err_lim, unit) in enumerate(_CHANNELS):
         row_title = f"{title} ({_heading_kind(path_name)})" if title == "heading" else title
+        left = fig.add_subplot(gs[row + 1, 0])
+        right = fig.add_subplot(gs[row + 1, 1])
         _draw_row(
-            axes[row][0], axes[row][1], row_title, ylabel, err_ylabel,
+            left, right, row_title, ylabel, err_ylabel,
             actual_key, cmd_key, err_key, err_lim, unit, labeled_series,
         )
-
-    axes[-1][0].set_xlabel("time (s)")
-    axes[-1][1].set_xlabel("time (s)")
+        if row == len(_CHANNELS) - 1:
+            left.set_xlabel("time (s)")
+            right.set_xlabel("time (s)")
 
     fig.suptitle(f"{path_name} @ {speed:g} m/s -- controller comparison", fontsize=14)
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.97))
