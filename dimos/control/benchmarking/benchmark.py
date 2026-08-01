@@ -118,7 +118,7 @@ def path_set() -> dict[str, NavPath]:
         "snake": snake(length=3.0, amplitude=0.3, wavelength=1.2),
         "mixed_turns": mixed_turns(),
         "random_mixed": random_mixed_path(
-            seed=42, n_segments=5, leg_range=(0.8, 1.5), angle_range=(20.0, 80.0)
+            seed=7, n_segments=5, leg_range=(0.5, 0.9), angle_range=(20.0, 80.0)
         ),
     }
 
