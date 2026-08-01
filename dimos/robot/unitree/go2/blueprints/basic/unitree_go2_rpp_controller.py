@@ -50,7 +50,8 @@ Run (one of two processes; the benchmark is the other)::
 from __future__ import annotations
 
 from dimos.control.components import HardwareComponent, HardwareType, make_twist_base_joints
-from dimos.control.coordinator import ControlCoordinator, TaskConfig
+from dimos.control.coordinator import TaskConfig
+from dimos.control.path_following_coordinator import PathFollowingCoordinator
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.transport import LCMTransport
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
@@ -68,7 +69,7 @@ _go2_joints = make_twist_base_joints("go2")
 unitree_go2_rpp_controller = (
     autoconnect(
         GO2Connection.blueprint(),
-        ControlCoordinator.blueprint(
+        PathFollowingCoordinator.blueprint(
             publish_joint_state=True,
             hardware=[
                 HardwareComponent(
